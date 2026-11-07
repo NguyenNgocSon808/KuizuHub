@@ -1,0 +1,5 @@
+[
+  {"id": 1, "full_name": "Sơn Nguyễn", "username": "son", "email": "son@kuizuhub.local", "password": "123456", "role": "HOST", "joined_at": "2026-09-01"},
+  {"id": 2, "full_name": "Bảo Trần", "username": "bao", "email": "bao@kuizuhub.local", "password": "123456", "role": "STUDENT", "joined_at": "2026-09-12"},
+  {"id": 3, "full_name": "Vương Lê", "username": "vuong", "email": "vuong@kuizuhub.local", "password": "123456", "role": "STUDENT", "joined_at": "2026-09-20"}
+]

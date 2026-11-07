@@ -1,1 +1,5 @@
-
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+client/data/mock_state.json

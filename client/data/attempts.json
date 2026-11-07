@@ -1,0 +1,7 @@
+[
+  {"id": 1, "user_id": 3, "title": "Luyện TCP Socket", "kind": "Luyện tập", "topic": "TCP Socket", "question_ids": [1,2,3,14,15], "answers": {"1": 1}, "score": 8.0, "correct_count": 4, "total": 5, "created_at": "2026-10-29 19:15", "duration_seconds": 540, "status": "SUBMITTED", "room_id": null},
+  {"id": 2, "user_id": 3, "title": "Kiểm tra DNS", "kind": "Thi phòng", "topic": "DNS", "question_ids": [6,7,18], "answers": {"6": 1}, "score": 6.7, "correct_count": 2, "total": 3, "created_at": "2026-10-31 09:30", "duration_seconds": 600, "status": "SUBMITTED", "room_id": 4},
+  {"id": 3, "user_id": 3, "title": "Luyện UDP", "kind": "Luyện tập", "topic": "UDP", "question_ids": [8,9,20], "answers": {"8": 2}, "score": 10.0, "correct_count": 3, "total": 3, "created_at": "2026-11-02 20:05", "duration_seconds": 420, "status": "SUBMITTED", "room_id": null},
+  {"id": 4, "user_id": 3, "title": "HTTP cơ bản", "kind": "Luyện tập", "topic": "HTTP/HTTPS", "question_ids": [4,5,16,19], "answers": {"4": 2}, "score": 7.5, "correct_count": 3, "total": 4, "created_at": "2026-11-04 18:40", "duration_seconds": 700, "status": "SUBMITTED", "room_id": null},
+  {"id": 5, "user_id": 3, "title": "Địa chỉ IP", "kind": "Thi phòng", "topic": "IP Address", "question_ids": [10,11,17], "answers": {"10": 1}, "score": 6.7, "correct_count": 2, "total": 3, "created_at": "2026-11-06 08:45", "duration_seconds": 550, "status": "SUBMITTED", "room_id": 6}
+]
