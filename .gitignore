@@ -3,3 +3,11 @@ __pycache__/
 .pytest_cache/
 .venv/
 client/data/mock_state.json
+
+# C build output and generated runtime data
+server/build/
+server/*.o
+server/*.exe
+server/data/*.db
+server/data/*.db-*
+server/logs/

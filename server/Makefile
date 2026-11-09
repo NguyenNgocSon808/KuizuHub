@@ -1,56 +1,41 @@
-# KuizuHub Server — Makefile
-#
-# Build trên Linux/macOS:   make
-# Build trên Windows (MinGW): make (cần cài MinGW + pthreads-win32)
-#
-# Chạy: ./server <port>
-# Ví dụ: ./server 9000
+CC := gcc
+CFLAGS := -std=c99 -Wall -Wextra -Werror -pedantic -O2 -pthread -Iinclude
+LDFLAGS := -pthread
 
-CC      = gcc
-CFLAGS  = -Wall -Wextra -std=c11 -g -pthread
-LDFLAGS = -pthread
-
-# Thêm -lws2_32 khi build trên Windows (MinGW)
-ifeq ($(OS), Windows_NT)
-    LDFLAGS += -lws2_32
-    EXT = .exe
+PORT ?= 5050
+BUILD_DIR := build
+EXE :=
+ifeq ($(OS),Windows_NT)
+EXE := .exe
+LDFLAGS += -lws2_32
+MAKE_BUILD_DIR = if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
+REMOVE_BUILD_DIR = if exist $(BUILD_DIR) rmdir /S /Q $(BUILD_DIR)
+RUN_SERVER = .\\$(TARGET) $(PORT)
 else
-    EXT =
+MAKE_BUILD_DIR = mkdir -p $(BUILD_DIR)
+REMOVE_BUILD_DIR = rm -rf $(BUILD_DIR)
+RUN_SERVER = ./$(TARGET) $(PORT)
 endif
+TARGET := $(BUILD_DIR)/kuizuhub-server$(EXE)
+SOURCES := src/main.c
 
-# ---------------------------------------------------------------
-#  Nguồn file
-# ---------------------------------------------------------------
-SRCS = server.c                      \
-       network/protocol.c            \
-       advanced/reconnect.c          \
-       advanced/encrypt.c            \
-       sha256.c                      # copy từ tuan5/
+.DEFAULT_GOAL := all
 
-TARGET = server$(EXT)
+all: $(TARGET)
 
-OBJS = $(SRCS:.c=.o)
+$(BUILD_DIR):
+	$(MAKE_BUILD_DIR)
 
-# ---------------------------------------------------------------
-#  Rules
-# ---------------------------------------------------------------
-all: copy_sha256 $(TARGET)
+$(TARGET): $(SOURCES) include/config.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SOURCES) -o $@ $(LDFLAGS)
 
-# Copy sha256.c và sha256.h từ tuan5 vào thư mục server/ để build
-copy_sha256:
-	@if [ ! -f sha256.c ]; then \
-	    echo "[Makefile] Copying sha256 from tuan5..."; \
-	    cp ../../../tuan5/sha256.c . && cp ../../../tuan5/sha256.h .; \
-	fi
+run: $(TARGET)
+	$(RUN_SERVER)
 
-$(TARGET): $(OBJS)
-	$(CC) $(OBJS) -o $@ $(LDFLAGS)
-	@echo "[Makefile] Build OK: $(TARGET)"
-
-%.o: %.c
-	$(CC) $(CFLAGS) -I. -c $< -o $@
+test: $(TARGET)
+	python3 -m unittest discover -s tests -p "test_*.py" -v
 
 clean:
-	rm -f $(OBJS) $(TARGET) sha256.c sha256.h
+	$(REMOVE_BUILD_DIR)
 
-.PHONY: all clean copy_sha256
+.PHONY: all run test clean
