@@ -1,0 +1,9 @@
+#ifndef KUIZUHUB_CONFIG_H
+#define KUIZUHUB_CONFIG_H
+
+#define KZ_DEFAULT_PORT 5050
+#define KZ_BIND_ADDRESS "0.0.0.0"
+#define KZ_DATABASE_PATH "data/exam.db"
+#define KZ_MAX_NDJSON_LINE_BYTES (64U * 1024U)
+
+#endif

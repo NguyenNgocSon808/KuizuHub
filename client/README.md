@@ -1,6 +1,6 @@
-# KuizuHub desktop mock frontend
+# KuizuHub desktop client
 
-Phiên bản này là frontend PySide6 độc lập: không mở TCP socket, không chạy C server và không cần database. Tất cả thao tác sử dụng `MockApiService`, lưu thay đổi demo ở `client/data/mock_state.json`.
+GUI PySide6 hiện dùng `MockApiService` để demo màn hình. Phase 0 cũng có `NetworkClient` TCP/NDJSON và command-line client `ping_client.py` để kiểm tra kết nối tới C server; GUI sẽ được thay sang network worker ở Phase 1.
 
 ## Chạy
 
@@ -11,6 +11,12 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows PowerShell
 pip install -r requirements.txt
 python main.py
+```
+
+Sau khi chạy server bằng `make run` ở thư mục gốc, kiểm tra giao thức thật:
+
+```bash
+python3 client/ping_client.py
 ```
 
 Trên macOS/Linux, kích hoạt bằng `source .venv/bin/activate`.
@@ -40,6 +46,6 @@ client/data/                  dữ liệu seed JSON
 client/tests/                 unit tests service
 ```
 
-## Thay bằng C TCP server sau này
+## Lộ trình nối GUI
 
-Màn hình chỉ gọi service layer. Giữ API tương thích với `MockApiService`, hiện thực `NetworkClient` bằng worker thread và NDJSON (`\n`-delimited), rồi inject client đó vào `MainWindow` thay cho `MockApiService`. `NetworkClient` hiện là stub rõ ràng, nên frontend này không vô tình mở kết nối mạng trong phiên bản mock.
+Màn hình tiếp tục gọi service layer. `NetworkClient` đã thực hiện NDJSON cho PING; Phase 1 sẽ thêm worker thread, persistent connection, request correlation và Qt signals trước khi inject nó vào `MainWindow` thay cho `MockApiService`.
