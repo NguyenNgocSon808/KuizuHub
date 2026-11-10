@@ -207,7 +207,7 @@ Các event bắt buộc: `EVENT_PARTICIPANT_JOINED`, `EVENT_ROOM_STARTED`, `EVEN
 
 ## 8. Kế hoạch theo phase
 
-## Phase 0 – Chốt hợp đồng và khởi tạo (Ngày 1)
+## Phase 0 – Chốt hợp đồng và khởi tạo
 
 **Cả ba người cùng làm, không tính điểm riêng.**
 
@@ -219,7 +219,7 @@ Các event bắt buộc: `EVENT_PARTICIPANT_JOINED`, `EVENT_ROOM_STARTED`, `EVEN
 
 **Done khi:** clone mới trên Ubuntu chạy được `make && make run`; client skeleton mở được và ping server.
 
-## Phase 1 – Nền tảng song song (Ngày 2–4)
+## Phase 1 – Nền tảng song song
 
 ### Người 1: Server core, protocol, auth
 
@@ -264,7 +264,7 @@ payload > 64 KB bị BAD_REQUEST, server tiếp tục phục vụ client khác
 
 **Acceptance tests:** admin thêm/sửa/disable question; GUI đăng ký/đăng nhập và hiển thị dashboard không block khi server phản hồi chậm.
 
-## Phase 2 – Phòng thi và giao diện thi (Ngày 5–8)
+## Phase 2 – Phòng thi và giao diện thi
 
 ### Người 2: Room lifecycle và scoring
 
@@ -308,7 +308,7 @@ Timer tự chấm người không nộp
 - Viết script stress test 10 client cùng `LOGIN`/`LIST_ROOMS`; server không chết, DB không corrupt.
 - Ghi connection open/close, lỗi protocol và access denied vào log.
 
-## Phase 3 – Lịch sử, biểu đồ và nâng cao (Ngày 9–11)
+## Phase 3 – Lịch sử, biểu đồ và nâng cao
 
 ### Người 3: Analytics và advanced 4 điểm
 
@@ -326,7 +326,7 @@ Timer tự chấm người không nộp
 - Người 2 bảo đảm lịch sử được ghi đúng lúc submit/auto-submit.
 - Cả ba chạy migration mới từ database rỗng trước khi merge.
 
-## Phase 4 – Kiểm thử, đóng gói và rehearsal (Ngày 12–14)
+## Phase 4 – Kiểm thử, đóng gói và rehearsal
 
 1. Chạy static checks/compiler warnings: `-Wall -Wextra -Werror -pedantic`.
 2. Test protocol với JSON bị cắt/dính/sai/thiếu field.
