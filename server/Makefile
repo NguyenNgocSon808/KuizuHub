@@ -27,12 +27,14 @@ SOURCES := src/main.c \
            src/core/server_socket.c \
            src/protocol/ndjson.c \
            src/auth/auth.c \
+           src/question/question.c \
            src/log/logger.c
 HEADERS := include/config.h \
            include/db.h \
            include/log.h \
            include/protocol.h \
            include/auth.h \
+           include/question.h \
            include/server_socket.h
 
 .DEFAULT_GOAL := all

@@ -184,3 +184,77 @@ Response lỗi khi không phải chủ phòng:
 ```json
 {"type":"ERROR","request_id":"start-001","error":{"code":"FORBIDDEN","message":"Only the room owner can perform this action"}}
 ```
+
+---
+
+## Request Phase 1 — Ngân hàng câu hỏi (Người 3)
+
+Các request trong phần này đều yêu cầu `token` hợp lệ của tài khoản có `role: "ADMIN"`. Các vai trò khác nhận `FORBIDDEN`. Chỉ API quản trị này trả về đáp án đúng; không dùng nó cho luồng thí sinh làm bài.
+
+Mẫu dữ liệu câu hỏi dùng cho create, update và import:
+
+```json
+{
+  "content":"Hàm nào tạo TCP socket?",
+  "topic":"TCP Socket",
+  "difficulty":"easy",
+  "options":["socket()","bind()","listen()","accept()"],
+  "correct_option_index":0,
+  "explanation":"socket() tạo endpoint trước khi bind/listen."
+}
+```
+
+- `content`: không rỗng, tối đa 1200 bytes.
+- `topic`: không rỗng, tối đa 64 bytes.
+- `difficulty`: đúng một trong `easy`, `medium`, `hard`.
+- `options`: chính xác bốn string không rỗng theo thứ tự A–D, tối đa 400 bytes mỗi option.
+- `correct_option_index`: số nguyên từ `0` đến `3`.
+- `explanation`: tùy chọn, tối đa 1200 bytes; thiếu thì lưu chuỗi rỗng.
+
+### 8. `LIST_QUESTIONS`
+
+Payload hỗ trợ `query`, `topic`, `difficulty`, `include_inactive` (`0` hoặc `1`, mặc định `1`), `limit` (1–20, mặc định 20) và `offset` (mặc định 0).
+
+```json
+{"type":"LIST_QUESTIONS","request_id":"questions-001","token":"<admin-token>","payload":{"topic":"TCP Socket","include_inactive":1,"limit":20,"offset":0}}
+```
+
+Response chứa `questions`, `limit`, `offset`, `has_more`. Mỗi câu có `id`, `content`, `topic`, `difficulty`, `options` (gồm `id`, `label`, `content`, `position`), `correct_option_id`, `correct_option_index`, `is_active` và `explanation`.
+
+### 9. `CREATE_QUESTION`
+
+Payload chính là mẫu câu hỏi ở trên. Câu mới luôn ở trạng thái `is_active = 1`.
+
+```json
+{"type":"CREATE_QUESTION","request_id":"question-create-001","token":"<admin-token>","payload":{"content":"Hàm nào tạo TCP socket?","topic":"TCP Socket","difficulty":"easy","options":["socket()","bind()","listen()","accept()"],"correct_option_index":0,"explanation":"socket() tạo endpoint trước khi bind/listen."}}
+```
+
+Response:
+
+```json
+{"type":"OK","request_id":"question-create-001","data":{"question_id":31,"created":true}}
+```
+
+### 10. `UPDATE_QUESTION`
+
+`id` là bắt buộc. Có thể gửi `is_active: 0` để disable mềm hoặc `is_active: 1` để enable lại. Khi sửa nội dung, đặt toàn bộ mẫu câu hỏi trong object `question`; bốn option hiện có được cập nhật tại chỗ để không làm đổi ID option đã được tham chiếu bởi dữ liệu thi sau này.
+
+```json
+{"type":"UPDATE_QUESTION","request_id":"question-update-001","token":"<admin-token>","payload":{"id":31,"is_active":0,"question":{"content":"Hàm nào gắn địa chỉ local vào socket?","topic":"TCP Socket","difficulty":"easy","options":["socket()","bind()","listen()","accept()"],"correct_option_index":1,"explanation":"bind() gắn địa chỉ local vào socket."}}}
+```
+
+Không có hard delete trong API này.
+
+### 11. `IMPORT_QUESTIONS`
+
+Nhận `payload.questions`, là mảng tối đa 100 object theo mẫu câu hỏi. Server validate toàn bộ trước khi ghi và import trong một transaction: nếu một item lỗi, không item nào được lưu.
+
+```json
+{"type":"IMPORT_QUESTIONS","request_id":"question-import-001","token":"<admin-token>","payload":{"questions":[{"content":"...","topic":"DNS","difficulty":"medium","options":["A","B","C","D"],"correct_option_index":2}]}}
+```
+
+Response thành công:
+
+```json
+{"type":"OK","request_id":"question-import-001","data":{"imported":1}}
+```

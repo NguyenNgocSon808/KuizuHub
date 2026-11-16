@@ -73,6 +73,17 @@ bool find_json_string_member(const char *json, const char *member,
 bool find_json_int_member(const char *json, const char *member, int *output);
 bool find_json_object_member(const char *json, const char *member,
                              char *output, size_t output_size);
+/** Copy a JSON array member (including its brackets) into output. */
+bool find_json_array_member(const char *json, const char *member,
+                            char *output, size_t output_size);
+/**
+ * Decode an array containing only JSON strings into fixed-width slots.
+ * Returns false when the member is missing, malformed, contains a non-string,
+ * or has more than `value_capacity` elements.
+ */
+bool find_json_string_array_member(const char *json, const char *member,
+                                   char *values, size_t value_width,
+                                   size_t value_capacity, size_t *out_count);
 void json_escape(const char *input, char *output, size_t output_size);
 
 #endif

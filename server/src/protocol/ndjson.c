@@ -364,6 +364,63 @@ bool find_json_object_member(const char *json, const char *member,
     return true;
 }
 
+bool find_json_array_member(const char *json, const char *member,
+                            char *output, size_t output_size) {
+    const char *val = find_json_member_value(json, member);
+    const char *end_array;
+    size_t len;
+
+    if (val == NULL || *val != '[' || output == NULL || output_size == 0U) {
+        return false;
+    }
+    end_array = val;
+    if (!skip_json_array(&end_array, 1U)) {
+        return false;
+    }
+    len = (size_t)(end_array - val);
+    if (len + 1U > output_size) {
+        return false;
+    }
+    memcpy(output, val, len);
+    output[len] = '\0';
+    return true;
+}
+
+bool find_json_string_array_member(const char *json, const char *member,
+                                   char *values, size_t value_width,
+                                   size_t value_capacity, size_t *out_count) {
+    const char *cursor = find_json_member_value(json, member);
+    size_t count = 0U;
+
+    if (cursor == NULL || *cursor != '[' || values == NULL || value_width == 0U ||
+        value_capacity == 0U || out_count == NULL) {
+        return false;
+    }
+    cursor = skip_whitespace(cursor + 1);
+    if (*cursor == ']') {
+        *out_count = 0U;
+        return true;
+    }
+
+    while (true) {
+        if (count >= value_capacity ||
+            !read_json_string(cursor, values + (count * value_width), value_width) ||
+            !skip_json_string(&cursor)) {
+            return false;
+        }
+        count++;
+        cursor = skip_whitespace(cursor);
+        if (*cursor == ']') {
+            *out_count = count;
+            return true;
+        }
+        if (*cursor++ != ',') {
+            return false;
+        }
+        cursor = skip_whitespace(cursor);
+    }
+}
+
 void json_escape(const char *input, char *output, size_t output_size) {
     size_t written = 0;
 
