@@ -5,6 +5,7 @@
 #define KZ_BIND_ADDRESS "0.0.0.0"
 #define KZ_DATABASE_PATH "data/exam.db"
 #define KZ_MIGRATION_PATH "migrations/001_initial.sql"
+#define KZ_MIGRATION_002_PATH "migrations/002_question_explanation.sql"
 #define KZ_LOG_DIR "logs"
 #define KZ_LOG_FILE_PATH "logs/server.log"
 #define KZ_MAX_NDJSON_LINE_BYTES (64U * 1024U)

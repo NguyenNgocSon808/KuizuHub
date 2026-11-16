@@ -13,6 +13,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = REPOSITORY_ROOT / "server" / "data" / "exam.db"
 MIGRATION_PATH = REPOSITORY_ROOT / "server" / "migrations" / "001_initial.sql"
+MIGRATION_002_PATH = REPOSITORY_ROOT / "server" / "migrations" / "002_question_explanation.sql"
 SEED_PATH = REPOSITORY_ROOT / "server" / "seed" / "questions.json"
 REQUIRED_DIFFICULTIES = {"easy", "medium", "hard"}
 
@@ -58,6 +59,15 @@ def seed_database(database_path: Path, reset: bool) -> None:
     with sqlite3.connect(database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(MIGRATION_PATH.read_text(encoding="utf-8"))
+        connection.executescript(MIGRATION_002_PATH.read_text(encoding="utf-8"))
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations "
+            "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.executemany(
+            "INSERT INTO schema_migrations(name) VALUES (?)",
+            [("001_initial",), ("002_question_explanation",)],
+        )
         for question in questions:
             cursor = connection.execute(
                 "INSERT INTO questions(content, topic, difficulty, correct_option_id, is_active) VALUES (?, ?, ?, NULL, 1)",
