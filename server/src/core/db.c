@@ -96,10 +96,98 @@ static bool apply_migration_file(sqlite3 *db, const char *migration_path) {
     return true;
 }
 
+static bool execute_sql(sqlite3 *db, const char *sql) {
+    char *err_msg = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err_msg);
+
+    if (rc == SQLITE_OK) {
+        return true;
+    }
+    fprintf(stderr, "Database statement failed: %s\n", err_msg ? err_msg : "unknown error");
+    sqlite3_free(err_msg);
+    return false;
+}
+
+static bool ensure_migration_registry(sqlite3 *db) {
+    return execute_sql(
+        db,
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        ");"
+    );
+}
+
+static bool migration_is_recorded(sqlite3 *db, const char *name) {
+    sqlite3_stmt *stmt = NULL;
+    bool recorded = false;
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT 1 FROM schema_migrations WHERE name = ? LIMIT 1;",
+                           -1, &stmt, NULL) != SQLITE_OK) {
+        return false;
+    }
+    (void)sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    recorded = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return recorded;
+}
+
+static bool record_migration(sqlite3 *db, const char *name) {
+    sqlite3_stmt *stmt = NULL;
+    bool ok = false;
+
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO schema_migrations(name) VALUES (?);",
+                           -1, &stmt, NULL) != SQLITE_OK) {
+        return false;
+    }
+    (void)sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static bool questions_have_explanation_column(sqlite3 *db) {
+    sqlite3_stmt *stmt = NULL;
+    bool exists = false;
+
+    if (sqlite3_prepare_v2(db, "PRAGMA table_info(questions);", -1, &stmt, NULL) != SQLITE_OK) {
+        return false;
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *column_name = (const char *)sqlite3_column_text(stmt, 1);
+        if (column_name != NULL && strcmp(column_name, "explanation") == 0) {
+            exists = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
+static bool apply_registered_migration(sqlite3 *db, const char *name,
+                                       const char *migration_path) {
+    bool ok;
+
+    if (migration_is_recorded(db, name)) {
+        return true;
+    }
+    if (!execute_sql(db, "BEGIN IMMEDIATE;")) {
+        return false;
+    }
+    ok = apply_migration_file(db, migration_path) && record_migration(db, name);
+    if (ok && execute_sql(db, "COMMIT;")) {
+        return true;
+    }
+    (void)execute_sql(db, "ROLLBACK;");
+    return false;
+}
+
 bool kz_db_init(const char *db_path, const char *migration_path) {
     char *err_msg = NULL;
     const char *path = (db_path != NULL && db_path[0] != '\0') ? db_path : KZ_DATABASE_PATH;
     const char *mig = (migration_path != NULL && migration_path[0] != '\0') ? migration_path : KZ_MIGRATION_PATH;
+    bool has_explanation = false;
 
     pthread_mutex_lock(&g_db_mutex);
     if (g_db != NULL) {
@@ -129,13 +217,38 @@ bool kz_db_init(const char *db_path, const char *migration_path) {
         return false;
     }
 
+    if (!ensure_migration_registry(g_db)) {
+        sqlite3_close(g_db);
+        g_db = NULL;
+        pthread_mutex_unlock(&g_db_mutex);
+        return false;
+    }
+
     if (!has_users_table(g_db)) {
-        if (!apply_migration_file(g_db, mig)) {
+        if (!apply_registered_migration(g_db, "001_initial", mig)) {
             sqlite3_close(g_db);
             g_db = NULL;
             pthread_mutex_unlock(&g_db_mutex);
             return false;
         }
+    } else if (!migration_is_recorded(g_db, "001_initial") &&
+               !record_migration(g_db, "001_initial")) {
+        fprintf(stderr, "Failed to register existing initial schema\n");
+        sqlite3_close(g_db);
+        g_db = NULL;
+        pthread_mutex_unlock(&g_db_mutex);
+        return false;
+    }
+
+    has_explanation = questions_have_explanation_column(g_db);
+    if (!migration_is_recorded(g_db, "002_question_explanation") &&
+        ((has_explanation && !record_migration(g_db, "002_question_explanation")) ||
+         (!has_explanation && !apply_registered_migration(g_db, "002_question_explanation",
+                                                           KZ_MIGRATION_002_PATH)))) {
+        sqlite3_close(g_db);
+        g_db = NULL;
+        pthread_mutex_unlock(&g_db_mutex);
+        return false;
     }
 
     pthread_mutex_unlock(&g_db_mutex);

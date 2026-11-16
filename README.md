@@ -2,7 +2,7 @@
 
 KuizuHub là ứng dụng thi trắc nghiệm gồm server C99 chạy TCP và client desktop Python/PySide6. Giao thức chung là **NDJSON qua TCP**: mỗi bản tin là một JSON UTF-8, kết thúc bởi đúng một ký tự `\n`.
 
-Phase 0 cung cấp một server skeleton đa client, migration SQLite, 30 câu hỏi seed và client TCP tối thiểu để kiểm tra `PING`. Các chức năng đăng nhập, phòng thi và GUI dùng dữ liệu thật sẽ được triển khai ở các phase sau.
+Phase 0 cung cấp server TCP, migration SQLite, 30 câu hỏi seed và kiểm tra `PING`. Phase 1 hiện đã có xác thực/session, protocol NDJSON, activity log, ngân hàng câu hỏi quản trị và GUI PySide6 kết nối TCP thật cho Register, Login, Dashboard và Question Bank. Phòng thi, luyện tập, lịch sử và analytics vẫn thuộc Phase 2–3 nên không được giả lập là dữ liệu thật trong GUI Phase 1.
 
 ## Yêu cầu trên Ubuntu 24.04
 
@@ -15,7 +15,7 @@ client/.venv/bin/pip install -r client/requirements.txt
 
 `sqlite3` CLI không bắt buộc: script khởi tạo dùng module `sqlite3` có sẵn của Python.
 
-## Chạy Phase 0 trên Windows (PowerShell)
+## Chạy Phase 1 trên Windows (PowerShell)
 
 Từ thư mục gốc repository, khởi tạo database và build server:
 
@@ -49,14 +49,24 @@ mingw32-make run PORT=5051
 python client/ping_client.py --port 5051
 ```
 
-Mở GUI PySide6 (GUI hiện vẫn dùng dữ liệu mock ở Phase 0):
+Mở GUI PySide6 kết nối TCP thật:
 
 ```powershell
 python -m pip install -r requirements.txt
 python main.py
 ```
 
-## Chạy Phase 0 trên Ubuntu 24.04
+GUI mặc định kết nối `127.0.0.1:5050`. Nếu đổi port/host, đặt cùng biến môi trường trước khi chạy GUI:
+
+```powershell
+$env:KUIZUHUB_HOST = "127.0.0.1"
+$env:KUIZUHUB_PORT = "5051"
+python main.py
+```
+
+Đăng ký một tài khoản có vai trò `ADMIN` trong màn đăng ký để nghiệm thu ngân hàng câu hỏi. Quy tắc role hiện theo contract `REGISTER` trong `docs/protocol.md`.
+
+## Chạy Phase 1 trên Ubuntu 24.04
 
 Từ thư mục gốc repository:
 
@@ -74,7 +84,7 @@ Server mặc định lắng nghe tại `0.0.0.0:5050`; có thể đổi port b�
 python3 client/ping_client.py
 ```
 
-Kết quả mong đợi là response `OK` với `data.message` bằng `pong`. GUI mock vẫn chạy độc lập bằng `python3 main.py`; nó chưa được nối vào backend thật ở Phase 0.
+Kết quả mong đợi là response `OK` với `data.message` bằng `pong`. GUI chạy bằng `python3 main.py` và kết nối đến server thật qua TCP.
 
 ## Kiểm thử
 
@@ -83,14 +93,17 @@ make test
 python3 -m pytest client/tests -q
 ```
 
-`make test` build server và chạy các kiểm thử TCP integration cho bản tin bị chia nhỏ, nhiều bản tin trong một lần gửi, và JSON lỗi.
+`make test` build server và chạy kiểm thử TCP cho framing, auth/session và ngân hàng câu hỏi: migration nâng cấp DB cũ, phân quyền ADMIN, create/list/update/disable và import atomic. Test client kiểm tra persistent TCP NDJSON với response bị chia nhỏ.
 
 ## Cấu trúc quan trọng
 
-- `server/src/main.c`: TCP server skeleton NDJSON, port mặc định 5050.
-- `server/migrations/001_initial.sql`: schema SQLite ban đầu.
+- `server/src/main.c`: TCP server NDJSON, port mặc định 5050.
+- `server/src/question/question.c`: CRUD/import ngân hàng câu hỏi chỉ dành cho ADMIN.
+- `server/migrations/001_initial.sql`, `server/migrations/002_question_explanation.sql`: schema và migration Phase 1.
 - `server/seed/questions.json`: 30 câu hỏi seed hợp lệ.
 - `scripts/init_db.sh`: tái tạo `server/data/exam.db` từ migration và seed.
+- `client/app/services/tcp_api_service.py`: worker `QThread` chạy TCP ngoài UI thread.
+- `client/app/ui/phase1_main_window.py`: các màn Phase 1 dùng API thật.
 - `docs/protocol.md`, `docs/database.md`: hợp đồng tích hợp.
 
 Không commit database cục bộ, `.venv`, binary, object file hoặc log server.

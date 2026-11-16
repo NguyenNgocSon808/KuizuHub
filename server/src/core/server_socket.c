@@ -3,6 +3,7 @@
 #include "config.h"
 #include "log.h"
 #include "protocol.h"
+#include "question.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -82,6 +83,14 @@ void handle_message(kz_connection *conn, const char *line) {
         handle_start_room_guard(conn, request_id, token, payload_json);
     } else if (strcmp(type, "END_ROOM") == 0) {
         handle_end_room_guard(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "LIST_QUESTIONS") == 0) {
+        handle_list_questions(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "CREATE_QUESTION") == 0) {
+        handle_create_question(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "UPDATE_QUESTION") == 0) {
+        handle_update_question(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "IMPORT_QUESTIONS") == 0) {
+        handle_import_questions(conn, request_id, token, payload_json);
     } else {
         send_error(conn->socket_fd, request_id, "NOT_FOUND", "Unsupported request type");
     }
