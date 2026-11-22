@@ -564,9 +564,12 @@ void handle_list_rooms(kz_connection *conn, const char *request_id, const char *
     sqlite3_stmt *stmt = NULL;
     const char *sql =
         "SELECT r.id, r.name, r.owner_id, u.username, r.status, r.duration_seconds, "
-        "       (SELECT COUNT(*) FROM room_participants rp WHERE rp.room_id = r.id) AS participant_count "
+        "       COUNT(rp.user_id) AS participant_count "
         "FROM exam_rooms r "
         "JOIN users u ON u.id = r.owner_id "
+        "LEFT JOIN room_participants rp ON rp.room_id = r.id "
+        "WHERE r.status IN ('WAITING', 'RUNNING', 'ENDED') "
+        "GROUP BY r.id, r.name, r.owner_id, u.username, r.status, r.duration_seconds "
         "ORDER BY r.id DESC;";
     char *buf;
     size_t buf_cap = 32768U;

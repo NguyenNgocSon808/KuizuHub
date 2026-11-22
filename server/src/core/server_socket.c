@@ -4,6 +4,8 @@
 #include "log.h"
 #include "protocol.h"
 #include "question.h"
+#include "room.h"
+#include "practice.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -12,6 +14,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 static volatile sig_atomic_t g_running = 1;
 static kz_socket_t g_listening_socket = KZ_INVALID_SOCKET;
@@ -21,6 +28,24 @@ typedef struct {
     char peer_ip[64];
     int peer_port;
 } client_accept_info;
+
+static void wait_for_expiry_tick(void) {
+#ifdef _WIN32
+    Sleep(1000U);
+#else
+    struct timespec delay = {1, 0};
+    (void)nanosleep(&delay, NULL);
+#endif
+}
+
+static void *room_expiry_worker(void *unused) {
+    (void)unused;
+    while (g_running) {
+        process_expired_rooms();
+        wait_for_expiry_tick();
+    }
+    return NULL;
+}
 
 void kz_server_stop(void) {
     g_running = 0;
@@ -80,7 +105,7 @@ void handle_message(kz_connection *conn, const char *line) {
     } else if (strcmp(type, "LIST_ROOMS") == 0) {
         handle_list_rooms(conn, request_id, token);
     } else if (strcmp(type, "START_ROOM") == 0) {
-        handle_start_room_guard(conn, request_id, token, payload_json);
+        handle_start_room(conn, request_id, token, payload_json);
     } else if (strcmp(type, "END_ROOM") == 0) {
         handle_end_room_guard(conn, request_id, token, payload_json);
     } else if (strcmp(type, "LIST_QUESTIONS") == 0) {
@@ -91,9 +116,26 @@ void handle_message(kz_connection *conn, const char *line) {
         handle_update_question(conn, request_id, token, payload_json);
     } else if (strcmp(type, "IMPORT_QUESTIONS") == 0) {
         handle_import_questions(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "CREATE_ROOM") == 0) {
+        handle_create_room(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "JOIN_ROOM") == 0) {
+        handle_join_room(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "GET_EXAM") == 0) {
+        handle_get_exam(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "SAVE_ANSWER") == 0) {
+        handle_save_answer(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "SUBMIT_EXAM") == 0) {
+        handle_submit_exam(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "START_PRACTICE") == 0) {
+        handle_start_practice(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "SAVE_PRACTICE_ANSWER") == 0) {
+        handle_save_practice_answer(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "SUBMIT_PRACTICE") == 0) {
+        handle_submit_practice(conn, request_id, token, payload_json);
     } else {
         send_error(conn->socket_fd, request_id, "NOT_FOUND", "Unsupported request type");
     }
+
 
     free(payload_json);
 }
@@ -127,6 +169,8 @@ static void *client_worker(void *argument) {
 int kz_server_run(int port) {
     struct sockaddr_in address;
     int option = 1;
+    pthread_t expiry_worker;
+    bool expiry_worker_started = false;
 
     g_running = 1;
     g_listening_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -158,6 +202,13 @@ int kz_server_run(int port) {
         g_listening_socket = KZ_INVALID_SOCKET;
         return -1;
     }
+    if (pthread_create(&expiry_worker, NULL, room_expiry_worker, NULL) != 0) {
+        perror("pthread_create expiry worker");
+        KZ_CLOSE_SOCKET(g_listening_socket);
+        g_listening_socket = KZ_INVALID_SOCKET;
+        return -1;
+    }
+    expiry_worker_started = true;
 
     printf("KuizuHub server listening on %s:%d (DB: %s)\n",
            KZ_BIND_ADDRESS, port, KZ_DATABASE_PATH);
@@ -207,6 +258,9 @@ int kz_server_run(int port) {
     if (g_listening_socket != KZ_INVALID_SOCKET) {
         KZ_CLOSE_SOCKET(g_listening_socket);
         g_listening_socket = KZ_INVALID_SOCKET;
+    }
+    if (expiry_worker_started) {
+        (void)pthread_join(expiry_worker, NULL);
     }
     return 0;
 }

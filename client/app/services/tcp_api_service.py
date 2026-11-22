@@ -40,12 +40,13 @@ class _TcpRequestWorker(QObject):
 
 
 class PhaseOneApiService(QObject):
-    """Non-blocking service layer for auth and question-bank requests.
+    """Non-blocking service layer for implemented TCP API requests.
 
     Callers receive a request ID immediately, then match it against
     ``request_succeeded`` or ``request_failed``.  The service deliberately
-    covers only Phase 1 APIs; room, practice, history, and analytics flows are
-    owned by later phases and are not backed by mock data here.
+    covers only endpoints backed by the C server. Implemented room-listing,
+    room-creation, and practice requests use the same worker; remaining room,
+    history, and analytics flows are still not backed by mock data here.
     """
 
     request_succeeded = Signal(str, object)
@@ -105,6 +106,9 @@ class PhaseOneApiService(QObject):
     def get_my_profile(self) -> str:
         return self.request("GET_MY_PROFILE", {}, authenticated=True)
 
+    def list_rooms(self) -> str:
+        return self.request("LIST_ROOMS", {}, authenticated=True)
+
     def list_questions(
         self,
         *,
@@ -147,6 +151,62 @@ class PhaseOneApiService(QObject):
 
     def import_questions(self, questions: list[dict[str, Any]]) -> str:
         return self.request("IMPORT_QUESTIONS", {"questions": questions}, authenticated=True)
+
+    def create_room(
+        self,
+        name: str,
+        duration_seconds: int,
+        rules: list[dict[str, Any]],
+    ) -> str:
+        return self.request(
+            "CREATE_ROOM",
+            {
+                "name": name,
+                "duration_seconds": duration_seconds,
+                "rules": rules,
+            },
+            authenticated=True,
+        )
+
+    def join_room(self, room_id: int) -> str:
+        return self.request("JOIN_ROOM", {"room_id": room_id}, authenticated=True)
+
+    def start_room(self, room_id: int) -> str:
+        return self.request("START_ROOM", {"room_id": room_id}, authenticated=True)
+
+    def get_exam(self, room_id: int) -> str:
+        return self.request("GET_EXAM", {"room_id": room_id}, authenticated=True)
+
+    def save_answer(self, room_id: int, question_id: int, option_id: int) -> str:
+        return self.request(
+            "SAVE_ANSWER",
+            {"room_id": room_id, "question_id": question_id, "option_id": option_id},
+            authenticated=True,
+        )
+
+    def submit_exam(self, room_id: int) -> str:
+        return self.request("SUBMIT_EXAM", {"room_id": room_id}, authenticated=True)
+
+    def start_practice(self, topic: str, difficulty: str, question_count: int,
+                       duration_seconds: int) -> str:
+        return self.request(
+            "START_PRACTICE",
+            {"topic": topic, "difficulty": difficulty, "question_count": question_count,
+             "duration_seconds": duration_seconds},
+            authenticated=True,
+        )
+
+    def save_practice_answer(self, attempt_id: int, question_id: int,
+                             selected_option_position: int) -> str:
+        return self.request(
+            "SAVE_PRACTICE_ANSWER",
+            {"attempt_id": attempt_id, "question_id": question_id,
+             "selected_option_position": selected_option_position},
+            authenticated=True,
+        )
+
+    def submit_practice(self, attempt_id: int) -> str:
+        return self.request("SUBMIT_PRACTICE", {"attempt_id": attempt_id}, authenticated=True)
 
     @Slot(str, object)
     def _handle_response(self, request_id: str, raw_response: object) -> None:

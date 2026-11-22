@@ -28,12 +28,16 @@ SOURCES := src/main.c \
            src/protocol/ndjson.c \
            src/auth/auth.c \
            src/question/question.c \
-           src/log/logger.c
+           src/log/logger.c \
+           src/room/room.c \
+           src/practice/practice.c
 HEADERS := include/config.h \
            include/db.h \
            include/log.h \
            include/protocol.h \
            include/auth.h \
+           include/room.h \
+           include/practice.h \
            include/question.h \
            include/server_socket.h
 
