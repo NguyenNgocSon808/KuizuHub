@@ -262,6 +262,7 @@ payload > 64 KB bị BAD_REQUEST, server tiếp tục phục vụ client khác
 - Tạo màn: Login/Register, Dashboard shell, thông báo lỗi/toast, widget loading.
 - Tạo design tokens cố định: màu, spacing, font, button state; không để mỗi màn tự viết style rời rạc.
 
+
 **Acceptance tests:** admin thêm/sửa/disable question; GUI đăng ký/đăng nhập và hiển thị dashboard không block khi server phản hồi chậm.
 
 ## Phase 2 – Phòng thi và giao diện thi
@@ -276,7 +277,6 @@ payload > 64 KB bị BAD_REQUEST, server tiếp tục phục vụ client khác
 - `SAVE_ANSWER`: chỉ room `RUNNING`, before `ended_at`, UPSERT đáp án.
 - `SUBMIT_EXAM`: transaction lock attempt, chấm từ snapshot, set `SUBMITTED`; phải idempotent.
 - Timer worker chạy mỗi giây hoặc mỗi 2 giây: tìm room quá `ended_at`, auto-submit tất cả chưa nộp, set `ENDED`.
-- `GET_ROOM_RESULTS`: owner xem toàn bộ; student chỉ xem kết quả của chính mình sau `ENDED`.
 
 **Acceptance tests:**
 
@@ -290,7 +290,7 @@ Timer tự chấm người không nộp
 ```
 
 ### Người 3: Các màn thi và kết quả
-
+- `GET_ROOM_RESULTS`: owner xem toàn bộ; student chỉ xem kết quả của chính mình sau `ENDED`.
 - Room list có badge `Chưa bắt đầu / Đang diễn ra / Đã kết thúc`.
 - Form tạo phòng có validation đúng rule câu hỏi.
 - Waiting room hiển thị người đã vào; nút Start chỉ hiện cho owner.
