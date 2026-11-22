@@ -99,7 +99,7 @@ python3 -m pytest client/tests -q
 
 - `server/src/main.c`: TCP server NDJSON, port mặc định 5050.
 - `server/src/question/question.c`: CRUD/import ngân hàng câu hỏi chỉ dành cho ADMIN.
-- `server/migrations/001_initial.sql`, `server/migrations/002_question_explanation.sql`: schema và migration Phase 1.
+- `server/migrations/001_initial.sql` đến `server/migrations/004_room_question_options.sql`: schema và các migration hiện có.
 - `server/seed/questions.json`: 30 câu hỏi seed hợp lệ.
 - `scripts/init_db.sh`: tái tạo `server/data/exam.db` từ migration và seed.
 - `client/app/services/tcp_api_service.py`: worker `QThread` chạy TCP ngoài UI thread.

@@ -246,12 +246,34 @@ class PhaseOneAuthCoreTests(unittest.TestCase):
         student_token = student_login["data"]["token"]  # type: ignore[index]
 
         with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            question_id = db.execute(
+                "INSERT INTO questions(content, topic, difficulty, is_active) "
+                "VALUES ('Owner start question', 'TCP Socket', 'easy', 1)"
+            ).lastrowid
+            option_ids = []
+            for position, label in enumerate("ABCD", start=1):
+                option_ids.append(
+                    db.execute(
+                        "INSERT INTO question_options(question_id, label, content, position) "
+                        "VALUES (?, ?, ?, ?)",
+                        (question_id, label, f"Option {label}", position),
+                    ).lastrowid
+                )
+            db.execute(
+                "UPDATE questions SET correct_option_id = ? WHERE id = ?",
+                (option_ids[0], question_id),
+            )
             cur = db.execute(
                 "INSERT INTO exam_rooms(owner_id, name, status, duration_seconds) "
                 "VALUES (?, 'Network Room 1', 'WAITING', 600)",
                 (host_id,),
             )
             room_id = cur.lastrowid
+            db.execute(
+                "INSERT INTO room_question_rules(room_id, topic, difficulty, quantity) "
+                "VALUES (?, 'TCP Socket', 'easy', 1)",
+                (room_id,),
+            )
             db.commit()
 
         # Student attempts START_ROOM -> FORBIDDEN

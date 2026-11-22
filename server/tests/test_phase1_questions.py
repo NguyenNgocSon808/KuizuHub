@@ -119,7 +119,15 @@ class PhaseOneQuestionBankTests(unittest.TestCase):
             columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
             migrations = {row[0] for row in db.execute("SELECT name FROM schema_migrations")}
         self.assertIn("explanation", columns)
-        self.assertEqual({"001_initial", "002_question_explanation"}, migrations)
+        self.assertEqual(
+            {
+                "001_initial",
+                "002_question_explanation",
+                "003_practice_sessions",
+                "004_room_question_options",
+            },
+            migrations,
+        )
 
         admin_registered = self.send_request(
             "REGISTER",

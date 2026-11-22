@@ -4,6 +4,10 @@ Database SQLite runtime nằm tại `server/data/exam.db`; file này bị Git ig
 
 - `server/migrations/001_initial.sql`: schema ban đầu.
 - `server/migrations/002_question_explanation.sql`: thêm `questions.explanation` cho ngân hàng câu hỏi Phase 1.
+- `server/migrations/003_practice_sessions.sql`: thêm phiên luyện tập, snapshot đề,
+  đáp án đang làm và các index liên quan.
+- `server/migrations/004_room_question_options.sql`: thêm snapshot bốn lựa chọn
+  cho đề phòng thi.
 - `server/seed/questions.json`: dữ liệu câu hỏi nguồn.
 - `scripts/init_db.sh`: xóa database demo cũ và tạo lại từ hai file trên.
 
@@ -21,9 +25,10 @@ Script kiểm tra ít nhất 30 câu hỏi, tối thiểu 3 topic, và mỗi top
 |---|---|
 | `users`, `sessions` | Tài khoản và phiên đăng nhập. |
 | `questions`, `question_options` | Ngân hàng câu hỏi và bốn lựa chọn. |
-| `exam_rooms`, `room_question_rules`, `room_questions` | Phòng thi, rule và snapshot đề. |
+| `exam_rooms`, `room_question_rules`, `room_questions`, `room_question_options` | Phòng thi, rule, snapshot câu hỏi và snapshot bốn lựa chọn. |
 | `room_participants`, `attempt_answers` | Trạng thái thí sinh và câu trả lời. |
-| `practice_attempts` | Lịch sử luyện tập. |
+| `practice_sessions`, `practice_session_questions`, `practice_session_options`, `practice_answers` | Phiên luyện tập đang diễn ra, snapshot đề/lựa chọn và đáp án autosave. |
+| `practice_attempts` | Lịch sử/tóm tắt kết quả luyện tập sau khi nộp. |
 | `activity_logs` | Audit log cho thay đổi trạng thái quan trọng. |
 
 `questions.correct_option_id` được set sau khi bốn option của câu đã được tạo. `questions.explanation` là chuỗi rỗng nếu câu hỏi không có giải thích. Các migration sau phải được thêm file mới, không sửa migration đã chạy trong môi trường chung.
