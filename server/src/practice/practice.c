@@ -68,7 +68,7 @@ static bool snapshot_questions(sqlite3 *db, int attempt_id, const char *topic,
     sqlite3_stmt *options = NULL;
     sqlite3_stmt *insert_option = NULL;
     const char *question_sql =
-        "SELECT q.id, q.content, correct.position FROM questions q "
+        "SELECT q.id, q.content, correct.position, q.topic, q.difficulty FROM questions q "
         "JOIN question_options correct ON correct.id = q.correct_option_id "
         "WHERE q.is_active = 1 AND q.topic = ? AND q.difficulty = ? "
         "ORDER BY RANDOM() LIMIT ?;";
@@ -76,8 +76,9 @@ static bool snapshot_questions(sqlite3 *db, int attempt_id, const char *topic,
 
     if (sqlite3_prepare_v2(db, question_sql, -1, &questions, NULL) != SQLITE_OK ||
         sqlite3_prepare_v2(db, "INSERT INTO practice_session_questions "
-        "(session_id, question_id, position, content_snapshot, correct_option_position) "
-        "VALUES (?, ?, ?, ?, ?);", -1, &insert_question, NULL) != SQLITE_OK ||
+        "(session_id, question_id, position, content_snapshot, correct_option_position, "
+        " topic_snapshot, difficulty_snapshot) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?);", -1, &insert_question, NULL) != SQLITE_OK ||
         sqlite3_prepare_v2(db, "SELECT position, label, content FROM question_options "
         "WHERE question_id = ? ORDER BY position;", -1, &options, NULL) != SQLITE_OK ||
         sqlite3_prepare_v2(db, "INSERT INTO practice_session_options "
@@ -92,12 +93,18 @@ static bool snapshot_questions(sqlite3 *db, int attempt_id, const char *topic,
         int question_id = sqlite3_column_int(questions, 0);
         const char *content = (const char *)sqlite3_column_text(questions, 1);
         int correct_position = sqlite3_column_int(questions, 2);
+            const char *question_topic = (const char *)sqlite3_column_text(questions, 3);
+            const char *question_difficulty = (const char *)sqlite3_column_text(questions, 4);
         int option_count = 0;
         (void)sqlite3_bind_int(insert_question, 1, attempt_id);
         (void)sqlite3_bind_int(insert_question, 2, question_id);
         (void)sqlite3_bind_int(insert_question, 3, position);
         (void)sqlite3_bind_text(insert_question, 4, content ? content : "", -1, SQLITE_STATIC);
         (void)sqlite3_bind_int(insert_question, 5, correct_position);
+            (void)sqlite3_bind_text(insert_question, 6,
+                                    question_topic ? question_topic : "", -1, SQLITE_STATIC);
+            (void)sqlite3_bind_text(insert_question, 7,
+                                    question_difficulty ? question_difficulty : "", -1, SQLITE_STATIC);
         if (sqlite3_step(insert_question) != SQLITE_DONE) goto done;
         (void)sqlite3_reset(insert_question); (void)sqlite3_clear_bindings(insert_question);
         (void)sqlite3_bind_int(options, 1, question_id);
@@ -122,24 +129,47 @@ done:
 }
 
 static char *build_practice_json(sqlite3 *db, int attempt_id) {
+    sqlite3_stmt *session = NULL;
     sqlite3_stmt *questions = NULL;
     sqlite3_stmt *options = NULL;
+    sqlite3_stmt *answers = NULL;
     char *result = (char *)malloc(KZ_MAX_NDJSON_LINE_BYTES);
     size_t used = 0U;
     bool first_question = true;
     bool failed = result == NULL;
+    char ended_at[32] = {0};
+    char escaped_ended_at[64];
+    if (!failed && sqlite3_prepare_v2(db,
+        "SELECT ended_at FROM practice_sessions WHERE id = ?;", -1, &session, NULL) != SQLITE_OK) failed = true;
+    if (!failed) {
+        (void)sqlite3_bind_int(session, 1, attempt_id);
+        if (sqlite3_step(session) != SQLITE_ROW || sqlite3_column_text(session, 0) == NULL) {
+            failed = true;
+        } else {
+            (void)snprintf(ended_at, sizeof(ended_at), "%s",
+                           (const char *)sqlite3_column_text(session, 0));
+        }
+    }
+    sqlite3_finalize(session);
+    session = NULL;
+    json_escape(ended_at, escaped_ended_at, sizeof(escaped_ended_at));
     if (!failed && !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
-                                  "{\"attempt_id\":%d,\"questions\":[", attempt_id)) failed = true;
+        "{\"attempt_id\":%d,\"ended_at\":\"%s\",\"questions\":[",
+        attempt_id, escaped_ended_at)) failed = true;
     if (!failed && sqlite3_prepare_v2(db, "SELECT question_id, position, content_snapshot FROM "
         "practice_session_questions WHERE session_id = ? ORDER BY position;", -1, &questions, NULL) != SQLITE_OK) failed = true;
     if (!failed && sqlite3_prepare_v2(db, "SELECT position, label, content_snapshot FROM "
         "practice_session_options WHERE session_id = ? AND question_id = ? ORDER BY position;",
         -1, &options, NULL) != SQLITE_OK) failed = true;
+    if (!failed && sqlite3_prepare_v2(db,
+        "SELECT selected_option_position FROM practice_answers "
+        "WHERE session_id = ? AND question_id = ?;", -1, &answers, NULL) != SQLITE_OK) failed = true;
     if (!failed) {
         (void)sqlite3_bind_int(questions, 1, attempt_id);
         while (sqlite3_step(questions) == SQLITE_ROW && !failed) {
             int question_id = sqlite3_column_int(questions, 0);
             const char *content = (const char *)sqlite3_column_text(questions, 2);
+            int selected_option_position = 0;
             char escaped[2401]; bool first_option = true;
             json_escape(content ? content : "", escaped, sizeof(escaped));
             if (!append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
@@ -156,11 +186,22 @@ static char *build_practice_json(sqlite3 *db, int attempt_id) {
                 first_option = false;
             }
             (void)sqlite3_reset(options); (void)sqlite3_clear_bindings(options);
-            if (!failed && !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used, "]}")) failed = true;
+            (void)sqlite3_bind_int(answers, 1, attempt_id);
+            (void)sqlite3_bind_int(answers, 2, question_id);
+            if (sqlite3_step(answers) == SQLITE_ROW) {
+                selected_option_position = sqlite3_column_int(answers, 0);
+            }
+            (void)sqlite3_reset(answers); (void)sqlite3_clear_bindings(answers);
+            if (!failed && selected_option_position > 0 &&
+                !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
+                               "],\"selected_option_position\":%d}", selected_option_position)) failed = true;
+            if (!failed && selected_option_position == 0 &&
+                !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
+                               "],\"selected_option_position\":null}")) failed = true;
             first_question = false;
         }
     }
-    sqlite3_finalize(questions); sqlite3_finalize(options);
+    sqlite3_finalize(session); sqlite3_finalize(questions); sqlite3_finalize(options); sqlite3_finalize(answers);
     if (failed || !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used, "]}")) { free(result); return NULL; }
     return result;
 }

@@ -4,6 +4,11 @@
 > cập nhật. Chức năng chưa hoàn thiện nổi bật là API xem kết quả sau khi room
 > đã `ENDED`.
 
+> **Ghi chú trạng thái 23/11/2026:** dòng trên là mô tả lịch sử. Luồng kết quả
+> sau `ENDED` (`GET_ROOM_RESULTS`), sảnh chờ và các màn desktop TCP thật đã
+> được tích hợp. Xem `docs/protocol.md` để lấy contract hiện hành và
+> `docs/test-plan.md` để nghiệm thu.
+
 ## 1. Tổng quan kiến trúc
 
 Client gửi mỗi request dưới dạng một JSON trên một dòng TCP (NDJSON):

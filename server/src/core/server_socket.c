@@ -6,6 +6,7 @@
 #include "question.h"
 #include "room.h"
 #include "practice.h"
+#include "history.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -102,6 +103,8 @@ void handle_message(kz_connection *conn, const char *line) {
         handle_logout(conn, request_id, token);
     } else if (strcmp(type, "GET_MY_PROFILE") == 0) {
         handle_get_my_profile(conn, request_id, token);
+    } else if (strcmp(type, "UPDATE_MY_PROFILE") == 0) {
+        handle_update_my_profile(conn, request_id, token, payload_json);
     } else if (strcmp(type, "LIST_ROOMS") == 0) {
         handle_list_rooms(conn, request_id, token);
     } else if (strcmp(type, "START_ROOM") == 0) {
@@ -126,12 +129,22 @@ void handle_message(kz_connection *conn, const char *line) {
         handle_save_answer(conn, request_id, token, payload_json);
     } else if (strcmp(type, "SUBMIT_EXAM") == 0) {
         handle_submit_exam(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "GET_ROOM_RESULTS") == 0) {
+        handle_get_room_results(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "GET_ROOM_LOBBY") == 0) {
+        handle_get_room_lobby(conn, request_id, token, payload_json);
     } else if (strcmp(type, "START_PRACTICE") == 0) {
         handle_start_practice(conn, request_id, token, payload_json);
     } else if (strcmp(type, "SAVE_PRACTICE_ANSWER") == 0) {
         handle_save_practice_answer(conn, request_id, token, payload_json);
     } else if (strcmp(type, "SUBMIT_PRACTICE") == 0) {
         handle_submit_practice(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "GET_MY_HISTORY") == 0) {
+        handle_get_my_history(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "GET_MY_STATS") == 0) {
+        handle_get_my_stats(conn, request_id, token, payload_json);
+    } else if (strcmp(type, "GET_LEADERBOARD") == 0) {
+        handle_get_leaderboard(conn, request_id, token, payload_json);
     } else {
         send_error(conn->socket_fd, request_id, "NOT_FOUND", "Unsupported request type");
     }

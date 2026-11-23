@@ -125,6 +125,7 @@ class PhaseOneQuestionBankTests(unittest.TestCase):
                 "002_question_explanation",
                 "003_practice_sessions",
                 "004_room_question_options",
+                "005_profile_analytics",
             },
             migrations,
         )

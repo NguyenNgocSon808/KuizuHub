@@ -8,6 +8,7 @@
 #define KZ_MIGRATION_002_PATH "migrations/002_question_explanation.sql"
 #define KZ_MIGRATION_003_PATH "migrations/003_practice_sessions.sql"
 #define KZ_MIGRATION_004_PATH "migrations/004_room_question_options.sql"
+#define KZ_MIGRATION_005_PATH "migrations/005_profile_analytics.sql"
 #define KZ_LOG_DIR "logs"
 #define KZ_LOG_FILE_PATH "logs/server.log"
 #define KZ_MAX_NDJSON_LINE_BYTES (64U * 1024U)

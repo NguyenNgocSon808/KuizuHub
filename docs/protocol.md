@@ -146,7 +146,7 @@ Request:
 Response:
 
 ```json
-{"type":"OK","request_id":"prof-001","data":{"user":{"id":1,"username":"son","role":"HOST","created_at":"2026-11-10 00:00:00"}}}
+{"type":"OK","request_id":"prof-001","data":{"user":{"id":1,"username":"son","display_name":"Sơn","role":"HOST","created_at":"2026-11-10 00:00:00"}}}
 ```
 
 ---
@@ -237,7 +237,7 @@ snapshot, không đọc lại câu hỏi/lựa chọn gốc và không trả đ�
 ```
 
 ```json
-{"type":"OK","request_id":"exam-001","data":{"room_id":1,"status":"RUNNING","questions":[{"id":12,"position":1,"content":"...","options":[{"id":45,"position":1,"label":"A","content":"..."}],"selected_option_id":45}]}}
+{"type":"OK","request_id":"exam-001","data":{"room_id":1,"status":"RUNNING","ended_at":"2026-11-22 10:30:00","questions":[{"id":12,"position":1,"content":"...","options":[{"id":45,"position":1,"label":"A","content":"..."}],"selected_option_id":45}]}}
 ```
 
 Phòng không tồn tại trả `NOT_FOUND`; room không ở `RUNNING` trả `CONFLICT`; user
@@ -466,3 +466,103 @@ ghi thêm history.
 
 Response gồm `attempt_id`, `state`, `correct_count`, `total` và `score` theo
 thang 10.
+
+---
+
+## Request Phase 2–3 — phòng thi, kết quả và analytics (Người 3)
+
+### `GET_ROOM_LOBBY`
+
+Chủ phòng hoặc thí sinh **đã tham gia** xem sảnh chờ và danh sách người tham
+gia. Request này không trả đề thi, đáp án hay token. UI dùng refresh có chủ
+đích; không giả lập realtime bằng dữ liệu local.
+
+```json
+{"type":"GET_ROOM_LOBBY","request_id":"lobby-001","token":"<session-token>","payload":{"room_id":1}}
+```
+
+Response gồm `room` (`id`, `name`, `owner_id`, `status`, `duration_seconds`,
+`started_at`, `ended_at`), `is_owner` và `participants` có `user_id`,
+`display_name`, `state`. User không phải owner/participant nhận `FORBIDDEN`.
+
+### `GET_ROOM_RESULTS`
+
+Kết quả chỉ công bố khi room ở `ENDED`.
+
+```json
+{"type":"GET_ROOM_RESULTS","request_id":"result-001","token":"<session-token>","payload":{"room_id":1}}
+```
+
+- Owner nhận `results` của toàn bộ participant: username, state, thời điểm nộp,
+  số đúng, tổng câu và điểm.
+- Participant chỉ nhận result của chính mình. Nếu caller là participant, response
+  còn có `review` từ snapshot gồm lựa chọn đã chọn, đáp án đúng và trạng thái
+  đúng/sai. Dữ liệu này tuyệt đối không xuất hiện trước `ENDED`.
+- User ngoài room nhận `FORBIDDEN`; room chưa kết thúc nhận `CONFLICT`.
+
+Response có cờ `results_truncated`/`review_truncated` khi response sẽ vượt giới
+hạn NDJSON 64 KiB; client phải báo rõ cho người dùng thay vì coi dữ liệu local là
+đầy đủ.
+
+### `GET_LEADERBOARD`
+
+Mọi user đã đăng nhập có thể xem leaderboard của room đã `ENDED`. Sắp xếp theo
+điểm giảm dần, sau đó thời điểm nộp tăng dần. Payload có `room_id`, `limit`
+(1–50, mặc định 20) và `offset` (mặc định 0).
+
+```json
+{"type":"GET_LEADERBOARD","request_id":"leaderboard-001","token":"<session-token>","payload":{"room_id":1,"limit":20,"offset":0}}
+```
+
+Response có `entries`, `limit`, `offset`, `has_more`. Mỗi entry có `rank`,
+`user_id`, `username`, `state`, `score`, `correct_count`, `total`,
+`submitted_at`. Room chưa `ENDED` nhận `CONFLICT`.
+
+### `GET_MY_HISTORY`
+
+Trả lịch sử bài practice và room exam đã `SUBMITTED`/`AUTO_SUBMITTED` của chính
+caller, theo trang. Payload dùng `limit` 1–50 và `offset` không âm.
+
+```json
+{"type":"GET_MY_HISTORY","request_id":"history-001","token":"<session-token>","payload":{"limit":20,"offset":0}}
+```
+
+Mỗi item có `kind` (`PRACTICE` hoặc `EXAM`), `attempt_id`, `room_id` (hoặc
+`null`), `title`, `topic`, `difficulty`, `score`, `correct_count`, `total`,
+`duration_seconds`, `completed_at`, `state`. Response có `has_more` để GUI
+phân trang an toàn.
+
+### `GET_MY_STATS`
+
+Trả thống kê chỉ của caller:
+
+```json
+{"type":"GET_MY_STATS","request_id":"stats-001","token":"<session-token>","payload":{}}
+```
+
+Response gồm `attempts`, `average_score`, `correct_count`, `total_questions`,
+`accuracy_percent`, `streak_days` và `by_topic`. Mỗi bucket `by_topic` có
+`topic`, `difficulty`, `correct_count`, `total`, `accuracy_percent`. Topic và
+độ khó được lưu snapshot cho bài mới để việc admin sửa ngân hàng câu hỏi sau này
+không làm sai số liệu lịch sử.
+
+### `UPDATE_MY_PROFILE`
+
+Cho phép đổi `display_name`, hoặc đổi password bằng cả `current_password` và
+`new_password` (8–128 ký tự). Không response/log password, password hash hay
+session token.
+
+```json
+{"type":"UPDATE_MY_PROFILE","request_id":"profile-update-001","token":"<session-token>","payload":{"display_name":"Nguyễn A","current_password":"OldPass123","new_password":"NewPass123"}}
+```
+
+Ít nhất một thay đổi là bắt buộc. Sai password hiện tại nhận `UNAUTHORIZED`;
+field sai kiểu hay thiếu cặp password nhận `BAD_REQUEST`.
+
+### CSV question bank trên GUI
+
+`IMPORT_QUESTIONS` vẫn là transaction server-side atomic tối đa 100 câu. GUI
+CSV đọc các cột `content`, `topic`, `difficulty`, `option_a`…`option_d`,
+`correct_option_index`, `explanation`, validate và báo đúng dòng lỗi trước khi
+gửi request JSON này. Xuất CSV lấy toàn bộ trang `LIST_QUESTIONS` theo filter
+đang chọn; dữ liệu vẫn có nguồn từ TCP server chứ không từ mock/local JSON.
