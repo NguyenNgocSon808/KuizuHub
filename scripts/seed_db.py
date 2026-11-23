@@ -16,6 +16,7 @@ MIGRATION_PATH = REPOSITORY_ROOT / "server" / "migrations" / "001_initial.sql"
 MIGRATION_002_PATH = REPOSITORY_ROOT / "server" / "migrations" / "002_question_explanation.sql"
 MIGRATION_003_PATH = REPOSITORY_ROOT / "server" / "migrations" / "003_practice_sessions.sql"
 MIGRATION_004_PATH = REPOSITORY_ROOT / "server" / "migrations" / "004_room_question_options.sql"
+MIGRATION_005_PATH = REPOSITORY_ROOT / "server" / "migrations" / "005_profile_analytics.sql"
 SEED_PATH = REPOSITORY_ROOT / "server" / "seed" / "questions.json"
 REQUIRED_DIFFICULTIES = {"easy", "medium", "hard"}
 
@@ -64,6 +65,7 @@ def seed_database(database_path: Path, reset: bool) -> None:
         connection.executescript(MIGRATION_002_PATH.read_text(encoding="utf-8"))
         connection.executescript(MIGRATION_003_PATH.read_text(encoding="utf-8"))
         connection.executescript(MIGRATION_004_PATH.read_text(encoding="utf-8"))
+        connection.executescript(MIGRATION_005_PATH.read_text(encoding="utf-8"))
         connection.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations "
             "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
@@ -75,6 +77,7 @@ def seed_database(database_path: Path, reset: bool) -> None:
                 ("002_question_explanation",),
                 ("003_practice_sessions",),
                 ("004_room_question_options",),
+                ("005_profile_analytics",),
             ],
         )
         for question in questions:

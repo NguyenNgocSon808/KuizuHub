@@ -15,6 +15,10 @@ void handle_save_answer(kz_connection *conn, const char *request_id,
                         const char *token, const char *payload_json);
 void handle_submit_exam(kz_connection *conn, const char *request_id,
                         const char *token, const char *payload_json);
+void handle_get_room_results(kz_connection *conn, const char *request_id,
+                             const char *token, const char *payload_json);
+void handle_get_room_lobby(kz_connection *conn, const char *request_id,
+                           const char *token, const char *payload_json);
 
 /* Run one or more short transactions to close every room whose ended_at passed. */
 void process_expired_rooms(void);

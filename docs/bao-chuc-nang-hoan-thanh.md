@@ -4,7 +4,34 @@
 > được tích hợp vào server/client cần thiết, cập nhật protocol/migration liên
 > quan, build không lỗi và test hoặc kịch bản tái hiện đã chạy thành công.
 
+> Cập nhật tích hợp ngày **23/11/2026**: `mingw32-make test` chạy **32** test
+> backend và `python -m pytest client/tests -q` chạy **7** test client đều đạt.
+
 ## Danh sách hoàn thành
+
+## Gói tích hợp Phase 2–3: GUI thật, kết quả và analytics
+
+- Phạm vi: entry point desktop chuyển sang `LiveMainWindow`, kết nối toàn bộ
+  room/practice/exam/result/history/profile qua `PhaseOneApiService` chạy TCP
+  trong `QThread`; không dùng `MockApiService` trong luồng demo.
+- API: `GET_ROOM_LOBBY`, `GET_ROOM_RESULTS`, `GET_MY_HISTORY`, `GET_MY_STATS`,
+  `GET_LEADERBOARD`, `UPDATE_MY_PROFILE`; thêm `ended_at`/đáp án đã lưu cho
+  client khôi phục đúng trạng thái đề.
+- Quyền riêng tư: kết quả và đáp án đúng chỉ trả sau `ENDED`; owner thấy bảng
+  kết quả phòng, participant chỉ thấy kết quả/review của chính mình; leaderboard
+  chỉ công bố sau khi phòng kết thúc.
+- Dữ liệu: migration `005_profile_analytics.sql` thêm display name, taxonomy
+  snapshot cho room/practice và index phục vụ history/stats. Sửa metadata câu
+  hỏi gốc sau đó không làm sai analytics của bài đã chốt.
+- Admin: Question Bank nhập JSON/CSV có báo số dòng lỗi và xuất CSV theo filter
+  từ `LIST_QUESTIONS` TCP.
+- File chính: `client/app/ui/live_main_window.py`,
+  `client/app/services/tcp_api_service.py`, `server/src/history/history.c`,
+  `server/src/room/room.c`, `server/src/auth/auth.c`,
+  `server/migrations/005_profile_analytics.sql`.
+- Kiểm thử: `server/tests/test_phase3_analytics.py` kiểm tra migration/profile,
+  lịch sử/thống kê và quyền room result/leaderboard; smoke test offscreen xác
+  nhận `LiveMainWindow` khởi tạo được.
 
 ## Audit log vòng đời room
 

@@ -4,6 +4,12 @@
 > phân công của nhóm thành backlog kỹ thuật có thể làm và kiểm thử; không thay
 > thế `docs/protocol.md` - đây vẫn là nguồn đúng duy nhất cho hợp đồng TCP.
 
+> **Cập nhật tích hợp 23/11/2026:** backlog bên dưới là ảnh chụp trước khi
+> hoàn thiện. `GET_ROOM_RESULTS`, `GET_ROOM_LOBBY`, GUI TCP thật cho
+> room/practice/result, history/stats/leaderboard/profile và CSV admin đã được
+> tích hợp. Trạng thái/kịch bản nghiệm thu hiện hành nằm ở `README.md`,
+> `docs/protocol.md`, `docs/test-plan.md` và `docs/demo-script.md`.
+
 ## 1. Phạm vi Bảo chịu trách nhiệm
 
 Theo bảng phân công, Bảo chịu trách nhiệm các tính năng 8-14, tổng **10 điểm**:

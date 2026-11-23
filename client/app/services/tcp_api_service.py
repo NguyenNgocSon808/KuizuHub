@@ -40,13 +40,12 @@ class _TcpRequestWorker(QObject):
 
 
 class PhaseOneApiService(QObject):
-    """Non-blocking service layer for implemented TCP API requests.
+    """Non-blocking service layer for every server-backed desktop feature.
 
     Callers receive a request ID immediately, then match it against
     ``request_succeeded`` or ``request_failed``.  The service deliberately
-    covers only endpoints backed by the C server. Implemented room-listing,
-    room-creation, and practice requests use the same worker; remaining room,
-    history, and analytics flows are still not backed by mock data here.
+    covers only endpoints backed by the C server. Every request uses the same
+    worker thread; no live UI page reads or writes the legacy mock data.
     """
 
     request_succeeded = Signal(str, object)
@@ -105,6 +104,22 @@ class PhaseOneApiService(QObject):
 
     def get_my_profile(self) -> str:
         return self.request("GET_MY_PROFILE", {}, authenticated=True)
+
+    def update_my_profile(
+        self,
+        *,
+        display_name: str | None = None,
+        current_password: str | None = None,
+        new_password: str | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {}
+        if display_name is not None:
+            payload["display_name"] = display_name
+        if current_password is not None:
+            payload["current_password"] = current_password
+        if new_password is not None:
+            payload["new_password"] = new_password
+        return self.request("UPDATE_MY_PROFILE", payload, authenticated=True)
 
     def list_rooms(self) -> str:
         return self.request("LIST_ROOMS", {}, authenticated=True)
@@ -187,6 +202,12 @@ class PhaseOneApiService(QObject):
     def submit_exam(self, room_id: int) -> str:
         return self.request("SUBMIT_EXAM", {"room_id": room_id}, authenticated=True)
 
+    def get_room_results(self, room_id: int) -> str:
+        return self.request("GET_ROOM_RESULTS", {"room_id": room_id}, authenticated=True)
+
+    def get_room_lobby(self, room_id: int) -> str:
+        return self.request("GET_ROOM_LOBBY", {"room_id": room_id}, authenticated=True)
+
     def start_practice(self, topic: str, difficulty: str, question_count: int,
                        duration_seconds: int) -> str:
         return self.request(
@@ -207,6 +228,19 @@ class PhaseOneApiService(QObject):
 
     def submit_practice(self, attempt_id: int) -> str:
         return self.request("SUBMIT_PRACTICE", {"attempt_id": attempt_id}, authenticated=True)
+
+    def get_my_history(self, *, limit: int = 20, offset: int = 0) -> str:
+        return self.request("GET_MY_HISTORY", {"limit": limit, "offset": offset}, authenticated=True)
+
+    def get_my_stats(self) -> str:
+        return self.request("GET_MY_STATS", {}, authenticated=True)
+
+    def get_leaderboard(self, room_id: int, *, limit: int = 20, offset: int = 0) -> str:
+        return self.request(
+            "GET_LEADERBOARD",
+            {"room_id": room_id, "limit": limit, "offset": offset},
+            authenticated=True,
+        )
 
     @Slot(str, object)
     def _handle_response(self, request_id: str, raw_response: object) -> None:

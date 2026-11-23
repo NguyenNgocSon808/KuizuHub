@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from .config import SERVER_HOST, SERVER_PORT
 from .services.tcp_api_service import PhaseOneApiService
-from .ui.phase1_main_window import PhaseOneMainWindow
+from .ui.live_main_window import LiveMainWindow
 from .ui.design import APP_QSS
 
 
@@ -14,9 +14,9 @@ def run() -> None:
     application = QApplication(sys.argv)
     application.setStyleSheet(APP_QSS)
     pixmap = QPixmap(420, 220); pixmap.fill(QColor("#102a43"))
-    splash = QSplashScreen(pixmap); splash.showMessage("KuizuHub\nĐang kết nối TCP Phase 1…", 0x84, QColor("white")); splash.show()
+    splash = QSplashScreen(pixmap); splash.showMessage("KuizuHub\nĐang kết nối TCP…", 0x84, QColor("white")); splash.show()
     service = PhaseOneApiService(SERVER_HOST, SERVER_PORT)
     application.aboutToQuit.connect(service.close)
-    window = PhaseOneMainWindow(service)
+    window = LiveMainWindow(service)
     QTimer.singleShot(700, lambda: (window.show(), splash.finish(window)))
     sys.exit(application.exec())

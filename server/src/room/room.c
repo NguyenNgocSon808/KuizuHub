@@ -442,13 +442,14 @@ static bool snapshot_room_questions(sqlite3 *db, int room_id, int *out_total) {
         "SELECT topic, difficulty, quantity FROM room_question_rules "
         "WHERE room_id = ? ORDER BY topic, difficulty;";
     const char *questions_sql =
-        "SELECT id, content, correct_option_id FROM questions "
+        "SELECT id, content, correct_option_id, topic, difficulty FROM questions "
         "WHERE is_active = 1 AND topic = ? AND difficulty = ? "
         "AND correct_option_id IS NOT NULL ORDER BY RANDOM() LIMIT ?;";
     const char *insert_question_sql =
         "INSERT INTO room_questions "
-        "(room_id, question_id, position, content_snapshot, correct_option_snapshot) "
-        "VALUES (?, ?, ?, ?, ?);";
+        "(room_id, question_id, position, content_snapshot, correct_option_snapshot, "
+        " topic_snapshot, difficulty_snapshot) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?);";
     const char *options_sql =
         "SELECT id, position, label, content FROM question_options "
         "WHERE question_id = ? ORDER BY position;";
@@ -485,6 +486,8 @@ static bool snapshot_room_questions(sqlite3 *db, int room_id, int *out_total) {
             int question_id = sqlite3_column_int(questions, 0);
             const char *content = (const char *)sqlite3_column_text(questions, 1);
             int correct_option_id = sqlite3_column_int(questions, 2);
+            const char *question_topic = (const char *)sqlite3_column_text(questions, 3);
+            const char *question_difficulty = (const char *)sqlite3_column_text(questions, 4);
             int option_count = 0;
 
             (void)sqlite3_bind_int(insert_question, 1, room_id);
@@ -492,6 +495,10 @@ static bool snapshot_room_questions(sqlite3 *db, int room_id, int *out_total) {
             (void)sqlite3_bind_int(insert_question, 3, next_position);
             (void)sqlite3_bind_text(insert_question, 4, content ? content : "", -1, SQLITE_STATIC);
             (void)sqlite3_bind_int(insert_question, 5, correct_option_id);
+            (void)sqlite3_bind_text(insert_question, 6,
+                                    question_topic ? question_topic : "", -1, SQLITE_STATIC);
+            (void)sqlite3_bind_text(insert_question, 7,
+                                    question_difficulty ? question_difficulty : "", -1, SQLITE_STATIC);
             if (sqlite3_step(insert_question) != SQLITE_DONE) {
                 goto done;
             }
@@ -689,6 +696,7 @@ rollback:
 }
 
 static char *build_exam_json(sqlite3 *db, int room_id, int user_id) {
+    sqlite3_stmt *room = NULL;
     sqlite3_stmt *questions = NULL;
     sqlite3_stmt *options = NULL;
     sqlite3_stmt *answers = NULL;
@@ -697,9 +705,26 @@ static char *build_exam_json(sqlite3 *db, int room_id, int user_id) {
     bool failed = result == NULL;
     bool first_question = true;
     int question_count = 0;
+    char ended_at[32] = {0};
+    char escaped_ended_at[64];
 
+    if (!failed && sqlite3_prepare_v2(db,
+        "SELECT ended_at FROM exam_rooms WHERE id = ?;", -1, &room, NULL) != SQLITE_OK) failed = true;
+    if (!failed) {
+        (void)sqlite3_bind_int(room, 1, room_id);
+        if (sqlite3_step(room) != SQLITE_ROW || sqlite3_column_text(room, 0) == NULL) {
+            failed = true;
+        } else {
+            (void)snprintf(ended_at, sizeof(ended_at), "%s",
+                           (const char *)sqlite3_column_text(room, 0));
+        }
+    }
+    sqlite3_finalize(room);
+    room = NULL;
+    json_escape(ended_at, escaped_ended_at, sizeof(escaped_ended_at));
     if (!failed && !append_room_json(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
-                                     "{\"room_id\":%d,\"status\":\"RUNNING\",\"questions\":[", room_id)) failed = true;
+        "{\"room_id\":%d,\"status\":\"RUNNING\",\"ended_at\":\"%s\",\"questions\":[",
+        room_id, escaped_ended_at)) failed = true;
     if (!failed && sqlite3_prepare_v2(db,
         "SELECT question_id, position, content_snapshot FROM room_questions WHERE room_id = ? ORDER BY position;",
         -1, &questions, NULL) != SQLITE_OK) failed = true;
@@ -753,7 +778,7 @@ static char *build_exam_json(sqlite3 *db, int room_id, int user_id) {
             question_count++;
         }
     }
-    sqlite3_finalize(questions); sqlite3_finalize(options); sqlite3_finalize(answers);
+    sqlite3_finalize(room); sqlite3_finalize(questions); sqlite3_finalize(options); sqlite3_finalize(answers);
     if (failed || question_count == 0 ||
         !append_room_json(result, KZ_MAX_NDJSON_LINE_BYTES, &used, "]}")) { free(result); return NULL; }
     return result;
@@ -937,6 +962,447 @@ void handle_submit_exam(kz_connection *conn, const char *request_id,
     return;
 rollback:
     sqlite3_finalize(statement); (void)execute_sql(db, "ROLLBACK;"); kz_db_unlock();
+    send_error(conn->socket_fd, request_id, error_code, error_message);
+}
+
+/* Append the caller's reviewed snapshot only after the room has ended. */
+static bool append_personal_room_review(sqlite3 *db, int room_id, int user_id,
+                                        char *buffer, size_t capacity, size_t *used) {
+    sqlite3_stmt *questions = NULL;
+    sqlite3_stmt *options = NULL;
+    bool first_question = true;
+    bool ok = false;
+
+    if (!append_room_json(buffer, capacity, used, ",\"review\":[") ||
+        sqlite3_prepare_v2(db,
+            "SELECT q.question_id, q.position, q.content_snapshot, q.correct_option_snapshot, "
+            "       a.selected_option_id "
+            "FROM room_questions q "
+            "LEFT JOIN attempt_answers a ON a.room_id = q.room_id "
+            " AND a.question_id = q.question_id AND a.user_id = ? "
+            "WHERE q.room_id = ? ORDER BY q.position;",
+            -1, &questions, NULL) != SQLITE_OK ||
+        sqlite3_prepare_v2(db,
+            "SELECT option_id_snapshot, position, label, content_snapshot "
+            "FROM room_question_options WHERE room_id = ? AND question_id = ? "
+            "ORDER BY position;",
+            -1, &options, NULL) != SQLITE_OK) {
+        goto done;
+    }
+
+    (void)sqlite3_bind_int(questions, 1, user_id);
+    (void)sqlite3_bind_int(questions, 2, room_id);
+    while (sqlite3_step(questions) == SQLITE_ROW) {
+        int question_id = sqlite3_column_int(questions, 0);
+        int position = sqlite3_column_int(questions, 1);
+        int correct_option_id = sqlite3_column_int(questions, 3);
+        int selected_option_id = sqlite3_column_type(questions, 4) == SQLITE_NULL
+            ? 0 : sqlite3_column_int(questions, 4);
+        const char *content = (const char *)sqlite3_column_text(questions, 2);
+        char escaped_content[2401];
+        bool first_option = true;
+        int option_count = 0;
+
+        json_escape(content ? content : "", escaped_content, sizeof(escaped_content));
+        if (!append_room_json(buffer, capacity, used,
+            "%s{\"question_id\":%d,\"position\":%d,\"content\":\"%s\",",
+            first_question ? "" : ",", question_id, position, escaped_content)) {
+            goto done;
+        }
+        if (selected_option_id > 0) {
+            if (!append_room_json(buffer, capacity, used, "\"selected_option_id\":%d,",
+                                  selected_option_id)) {
+                goto done;
+            }
+        } else if (!append_room_json(buffer, capacity, used, "\"selected_option_id\":null,")) {
+            goto done;
+        }
+        if (!append_room_json(buffer, capacity, used,
+            "\"correct_option_id\":%d,\"is_correct\":%s,\"options\":[",
+            correct_option_id, selected_option_id == correct_option_id ? "true" : "false")) {
+            goto done;
+        }
+        (void)sqlite3_bind_int(options, 1, room_id);
+        (void)sqlite3_bind_int(options, 2, question_id);
+        while (sqlite3_step(options) == SQLITE_ROW) {
+            char escaped_label[32];
+            char escaped_option[801];
+            json_escape((const char *)sqlite3_column_text(options, 2), escaped_label, sizeof(escaped_label));
+            json_escape((const char *)sqlite3_column_text(options, 3), escaped_option, sizeof(escaped_option));
+            if (!append_room_json(buffer, capacity, used,
+                "%s{\"id\":%d,\"position\":%d,\"label\":\"%s\",\"content\":\"%s\"}",
+                first_option ? "" : ",", sqlite3_column_int(options, 0),
+                sqlite3_column_int(options, 1), escaped_label, escaped_option)) {
+                goto done;
+            }
+            first_option = false;
+            option_count++;
+        }
+        (void)sqlite3_reset(options);
+        (void)sqlite3_clear_bindings(options);
+        if (option_count != 4 || !append_room_json(buffer, capacity, used, "]}")) {
+            goto done;
+        }
+        first_question = false;
+    }
+    ok = append_room_json(buffer, capacity, used, "]");
+
+done:
+    sqlite3_finalize(questions);
+    sqlite3_finalize(options);
+    return ok;
+}
+
+void handle_get_room_lobby(kz_connection *conn, const char *request_id,
+                           const char *token, const char *payload_json) {
+    kz_auth_user user;
+    const char *error_code = NULL;
+    const char *error_message = NULL;
+    sqlite3 *db;
+    sqlite3_stmt *room_statement = NULL;
+    sqlite3_stmt *participant_statement = NULL;
+    int room_id = 0;
+    int owner_id = 0;
+    bool is_participant = false;
+    bool first = true;
+    char room_name[256] = {0};
+    char status[16] = {0};
+    char started_at[32] = {0};
+    char ended_at[32] = {0};
+    int duration_seconds = 0;
+    char *data_json = NULL;
+    size_t used = 0U;
+    const size_t data_capacity = KZ_MAX_NDJSON_LINE_BYTES - 512U;
+    char room_id_text[32];
+
+    if (!require_session(token, &user, &error_code, &error_message)) {
+        send_error(conn->socket_fd, request_id, error_code, error_message);
+        return;
+    }
+    if (!find_json_int_member(payload_json, "room_id", &room_id) || room_id <= 0) {
+        send_error(conn->socket_fd, request_id, "BAD_REQUEST", "room_id must be a positive integer");
+        return;
+    }
+    db = kz_db_lock();
+    if (db == NULL) {
+        kz_db_unlock();
+        send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Database error");
+        return;
+    }
+    if (sqlite3_prepare_v2(db,
+        "SELECT owner_id, name, status, duration_seconds, started_at, ended_at "
+        "FROM exam_rooms WHERE id = ?;", -1, &room_statement, NULL) != SQLITE_OK) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not read room lobby";
+        goto error;
+    }
+    (void)sqlite3_bind_int(room_statement, 1, room_id);
+    if (sqlite3_step(room_statement) != SQLITE_ROW) {
+        error_code = "NOT_FOUND";
+        error_message = "Room not found";
+        goto error;
+    }
+    owner_id = sqlite3_column_int(room_statement, 0);
+    (void)snprintf(room_name, sizeof(room_name), "%s",
+                   (const char *)(sqlite3_column_text(room_statement, 1) != NULL
+                       ? sqlite3_column_text(room_statement, 1) : (const unsigned char *)""));
+    (void)snprintf(status, sizeof(status), "%s",
+                   (const char *)(sqlite3_column_text(room_statement, 2) != NULL
+                       ? sqlite3_column_text(room_statement, 2) : (const unsigned char *)""));
+    duration_seconds = sqlite3_column_int(room_statement, 3);
+    if (sqlite3_column_text(room_statement, 4) != NULL) {
+        (void)snprintf(started_at, sizeof(started_at), "%s",
+                       (const char *)sqlite3_column_text(room_statement, 4));
+    }
+    if (sqlite3_column_text(room_statement, 5) != NULL) {
+        (void)snprintf(ended_at, sizeof(ended_at), "%s",
+                       (const char *)sqlite3_column_text(room_statement, 5));
+    }
+    sqlite3_finalize(room_statement);
+    room_statement = NULL;
+
+    if (sqlite3_prepare_v2(db,
+        "SELECT 1 FROM room_participants WHERE room_id = ? AND user_id = ?;",
+        -1, &room_statement, NULL) != SQLITE_OK) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not read room participant";
+        goto error;
+    }
+    (void)sqlite3_bind_int(room_statement, 1, room_id);
+    (void)sqlite3_bind_int(room_statement, 2, user.id);
+    is_participant = sqlite3_step(room_statement) == SQLITE_ROW;
+    sqlite3_finalize(room_statement);
+    room_statement = NULL;
+    if (owner_id != user.id && !is_participant) {
+        error_code = "FORBIDDEN";
+        error_message = "Only the room owner or a room participant can view this lobby";
+        goto error;
+    }
+    data_json = (char *)malloc(data_capacity);
+    if (data_json == NULL) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Out of memory";
+        goto error;
+    }
+    {
+        char escaped_name[512];
+        char escaped_status[32];
+        char escaped_started_at[64];
+        char escaped_ended_at[64];
+        json_escape(room_name, escaped_name, sizeof(escaped_name));
+        json_escape(status, escaped_status, sizeof(escaped_status));
+        json_escape(started_at, escaped_started_at, sizeof(escaped_started_at));
+        json_escape(ended_at, escaped_ended_at, sizeof(escaped_ended_at));
+        if (!append_room_json(data_json, data_capacity, &used,
+            "{\"room\":{\"id\":%d,\"name\":\"%s\",\"owner_id\":%d,"
+            "\"status\":\"%s\",\"duration_seconds\":%d,",
+            room_id, escaped_name, owner_id, escaped_status, duration_seconds) ||
+            (started_at[0] != '\0'
+                ? !append_room_json(data_json, data_capacity, &used,
+                                    "\"started_at\":\"%s\",", escaped_started_at)
+                : !append_room_json(data_json, data_capacity, &used, "\"started_at\":null,")) ||
+            (ended_at[0] != '\0'
+                ? !append_room_json(data_json, data_capacity, &used,
+                                    "\"ended_at\":\"%s\"},", escaped_ended_at)
+                : !append_room_json(data_json, data_capacity, &used, "\"ended_at\":null},")) ||
+            !append_room_json(data_json, data_capacity, &used,
+                              "\"is_owner\":%s,\"participants\":[",
+                              owner_id == user.id ? "true" : "false")) {
+            error_code = "INTERNAL_ERROR";
+            error_message = "Could not build room lobby";
+            goto error;
+        }
+    }
+    if (sqlite3_prepare_v2(db,
+        "SELECT p.user_id, COALESCE(NULLIF(u.display_name, ''), u.username), p.state "
+        "FROM room_participants p JOIN users u ON u.id = p.user_id "
+        "WHERE p.room_id = ? ORDER BY u.username ASC;", -1, &participant_statement, NULL) != SQLITE_OK) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not read lobby participants";
+        goto error;
+    }
+    (void)sqlite3_bind_int(participant_statement, 1, room_id);
+    while (sqlite3_step(participant_statement) == SQLITE_ROW) {
+        char escaped_name[194];
+        char escaped_state[32];
+        const char *participant_name = (const char *)sqlite3_column_text(participant_statement, 1);
+        const char *participant_state = (const char *)sqlite3_column_text(participant_statement, 2);
+        json_escape(participant_name ? participant_name : "", escaped_name, sizeof(escaped_name));
+        json_escape(participant_state ? participant_state : "", escaped_state, sizeof(escaped_state));
+        if (!append_room_json(data_json, data_capacity, &used,
+            "%s{\"user_id\":%d,\"display_name\":\"%s\",\"state\":\"%s\"}",
+            first ? "" : ",", sqlite3_column_int(participant_statement, 0), escaped_name, escaped_state)) {
+            error_code = "INTERNAL_ERROR";
+            error_message = "Lobby response is too large";
+            goto error;
+        }
+        first = false;
+    }
+    sqlite3_finalize(participant_statement);
+    participant_statement = NULL;
+    if (!append_room_json(data_json, data_capacity, &used, "]}")) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not build room lobby";
+        goto error;
+    }
+    (void)snprintf(room_id_text, sizeof(room_id_text), "%d", room_id);
+    kz_log_event_db(db, user.id, "ROOM_LOBBY_VIEWED", "exam_room", room_id_text, "{}");
+    kz_db_unlock();
+    (void)send_ok_data(conn->socket_fd, request_id, data_json);
+    free(data_json);
+    return;
+
+error:
+    sqlite3_finalize(room_statement);
+    sqlite3_finalize(participant_statement);
+    kz_db_unlock();
+    free(data_json);
+    send_error(conn->socket_fd, request_id, error_code, error_message);
+}
+
+void handle_get_room_results(kz_connection *conn, const char *request_id,
+                             const char *token, const char *payload_json) {
+    kz_auth_user user;
+    const char *error_code = NULL;
+    const char *error_message = NULL;
+    sqlite3 *db;
+    sqlite3_stmt *statement = NULL;
+    sqlite3_stmt *participants = NULL;
+    int room_id = 0;
+    int owner_id = 0;
+    int question_count = 0;
+    bool is_owner = false;
+    bool is_participant = false;
+    bool first = true;
+    char room_name[256] = {0};
+    char *data_json = NULL;
+    size_t used = 0U;
+    bool result_rows_truncated = false;
+    bool review_truncated = false;
+    char room_id_text[32];
+    const size_t data_capacity = KZ_MAX_NDJSON_LINE_BYTES - 512U;
+
+    if (!require_session(token, &user, &error_code, &error_message)) {
+        send_error(conn->socket_fd, request_id, error_code, error_message);
+        return;
+    }
+    if (!find_json_int_member(payload_json, "room_id", &room_id) || room_id <= 0) {
+        send_error(conn->socket_fd, request_id, "BAD_REQUEST", "room_id must be a positive integer");
+        return;
+    }
+    db = kz_db_lock();
+    if (db == NULL) {
+        kz_db_unlock();
+        send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Database error");
+        return;
+    }
+    if (sqlite3_prepare_v2(db,
+        "SELECT owner_id, name, status, "
+        "(SELECT COUNT(*) FROM room_questions WHERE room_id = exam_rooms.id) "
+        "FROM exam_rooms WHERE id = ?;", -1, &statement, NULL) != SQLITE_OK) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not read room results";
+        goto error;
+    }
+    (void)sqlite3_bind_int(statement, 1, room_id);
+    if (sqlite3_step(statement) != SQLITE_ROW) {
+        error_code = "NOT_FOUND";
+        error_message = "Room not found";
+        goto error;
+    }
+    owner_id = sqlite3_column_int(statement, 0);
+    {
+        const char *stored_room_name = (const char *)sqlite3_column_text(statement, 1);
+        const char *status = (const char *)sqlite3_column_text(statement, 2);
+        (void)snprintf(room_name, sizeof(room_name), "%s", stored_room_name ? stored_room_name : "");
+        if (status == NULL || strcmp(status, "ENDED") != 0) {
+            error_code = "CONFLICT";
+            error_message = "Room results are available only after the room has ended";
+            goto error;
+        }
+    }
+    question_count = sqlite3_column_int(statement, 3);
+    sqlite3_finalize(statement);
+    statement = NULL;
+    is_owner = owner_id == user.id;
+
+    if (sqlite3_prepare_v2(db,
+        "SELECT 1 FROM room_participants WHERE room_id = ? AND user_id = ?;",
+        -1, &statement, NULL) != SQLITE_OK) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not read room participant";
+        goto error;
+    }
+    (void)sqlite3_bind_int(statement, 1, room_id);
+    (void)sqlite3_bind_int(statement, 2, user.id);
+    is_participant = sqlite3_step(statement) == SQLITE_ROW;
+    sqlite3_finalize(statement);
+    statement = NULL;
+    if (!is_owner && !is_participant) {
+        error_code = "FORBIDDEN";
+        error_message = "Only the room owner or a room participant can view results";
+        goto error;
+    }
+
+    data_json = (char *)malloc(data_capacity);
+    if (data_json == NULL) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Out of memory";
+        goto error;
+    }
+    {
+        char escaped_name[512];
+        json_escape(room_name, escaped_name, sizeof(escaped_name));
+        if (!append_room_json(data_json, data_capacity, &used,
+            "{\"room\":{\"id\":%d,\"name\":\"%s\",\"status\":\"ENDED\",\"question_count\":%d},"
+            "\"scope\":\"%s\",\"results\":[", room_id, escaped_name, question_count,
+            is_owner ? "owner" : "participant")) {
+            error_code = "INTERNAL_ERROR";
+            error_message = "Could not build room results";
+            goto error;
+        }
+    }
+    if (sqlite3_prepare_v2(db,
+        is_owner
+            ? "SELECT p.user_id, u.username, p.state, p.submitted_at, p.score, p.correct_count "
+              "FROM room_participants p JOIN users u ON u.id = p.user_id "
+              "WHERE p.room_id = ? ORDER BY p.score DESC, p.submitted_at ASC, p.user_id ASC;"
+            : "SELECT p.user_id, u.username, p.state, p.submitted_at, p.score, p.correct_count "
+              "FROM room_participants p JOIN users u ON u.id = p.user_id "
+              "WHERE p.room_id = ? AND p.user_id = ?;",
+        -1, &participants, NULL) != SQLITE_OK) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not read participant results";
+        goto error;
+    }
+    (void)sqlite3_bind_int(participants, 1, room_id);
+    if (!is_owner) {
+        (void)sqlite3_bind_int(participants, 2, user.id);
+    }
+    while (sqlite3_step(participants) == SQLITE_ROW) {
+        char escaped_username[128];
+        char escaped_state[32];
+        char escaped_submitted[64];
+        const char *username = (const char *)sqlite3_column_text(participants, 1);
+        const char *state = (const char *)sqlite3_column_text(participants, 2);
+        const char *submitted_at = (const char *)sqlite3_column_text(participants, 3);
+        if (used + 512U >= data_capacity) {
+            result_rows_truncated = true;
+            break;
+        }
+        json_escape(username ? username : "", escaped_username, sizeof(escaped_username));
+        json_escape(state ? state : "", escaped_state, sizeof(escaped_state));
+        json_escape(submitted_at ? submitted_at : "", escaped_submitted, sizeof(escaped_submitted));
+        if (!append_room_json(data_json, data_capacity, &used,
+            "%s{\"user_id\":%d,\"username\":\"%s\",\"state\":\"%s\",",
+            first ? "" : ",", sqlite3_column_int(participants, 0), escaped_username, escaped_state) ||
+            (submitted_at != NULL
+                ? !append_room_json(data_json, data_capacity, &used, "\"submitted_at\":\"%s\",", escaped_submitted)
+                : !append_room_json(data_json, data_capacity, &used, "\"submitted_at\":null,")) ||
+            !append_room_json(data_json, data_capacity, &used,
+                "\"score\":%.2f,\"correct_count\":%d,\"total\":%d}",
+                sqlite3_column_double(participants, 4), sqlite3_column_int(participants, 5),
+                question_count)) {
+            result_rows_truncated = true;
+            break;
+        }
+        first = false;
+    }
+    sqlite3_finalize(participants);
+    participants = NULL;
+    if (!append_room_json(data_json, data_capacity, &used,
+        "],\"results_truncated\":%s", result_rows_truncated ? "true" : "false")) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not build room results";
+        goto error;
+    }
+    if (is_participant) {
+        size_t review_start = used;
+        if (!append_personal_room_review(db, room_id, user.id, data_json, data_capacity, &used)) {
+            used = review_start;
+            data_json[used] = '\0';
+            review_truncated = true;
+        }
+    }
+    if (!append_room_json(data_json, data_capacity, &used,
+        ",\"review_truncated\":%s}", review_truncated ? "true" : "false")) {
+        error_code = "INTERNAL_ERROR";
+        error_message = "Could not build room results";
+        goto error;
+    }
+    (void)snprintf(room_id_text, sizeof(room_id_text), "%d", room_id);
+    kz_log_event_db(db, user.id, "ROOM_RESULTS_VIEWED", "exam_room", room_id_text,
+                    is_owner ? "{\"scope\":\"owner\"}" : "{\"scope\":\"participant\"}");
+    kz_db_unlock();
+    (void)send_ok_data(conn->socket_fd, request_id, data_json);
+    free(data_json);
+    return;
+
+error:
+    sqlite3_finalize(statement);
+    sqlite3_finalize(participants);
+    kz_db_unlock();
+    free(data_json);
     send_error(conn->socket_fd, request_id, error_code, error_message);
 }
 
