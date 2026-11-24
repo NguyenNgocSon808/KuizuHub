@@ -189,6 +189,9 @@ class PhaseOneApiService(QObject):
     def start_room(self, room_id: int) -> str:
         return self.request("START_ROOM", {"room_id": room_id}, authenticated=True)
 
+    def end_room(self, room_id: int) -> str:
+        return self.request("END_ROOM", {"room_id": room_id}, authenticated=True)
+
     def get_exam(self, room_id: int) -> str:
         return self.request("GET_EXAM", {"room_id": room_id}, authenticated=True)
 

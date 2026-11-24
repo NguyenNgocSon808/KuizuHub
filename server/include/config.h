@@ -12,6 +12,8 @@
 #define KZ_LOG_DIR "logs"
 #define KZ_LOG_FILE_PATH "logs/server.log"
 #define KZ_MAX_NDJSON_LINE_BYTES (64U * 1024U)
+/* A room can contain 800 questions with options and review explanations. */
+#define KZ_MAX_NDJSON_RESPONSE_BYTES (8U * 1024U * 1024U)
 #define KZ_RECEIVE_BUFFER_BYTES 4096U
 #define KZ_SESSION_TTL_HOURS 24
 #define KZ_PBKDF2_ITERATIONS 100000

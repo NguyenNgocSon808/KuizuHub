@@ -8,9 +8,11 @@ top of the same QThread-backed TCP service used by the Phase 1 surfaces.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from math import ceil
+from time import monotonic
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -241,6 +243,14 @@ class LiveRoomsPage(QWidget):
         self._pending[request_id] = "start"
         self.notice.setText("Đang chốt đề và bắt đầu phòng…")
 
+    def _end(self, room_id: int) -> None:
+        if QMessageBox.question(
+            self, "Kết thúc phòng", "Kết thúc ngay và chấm các đáp án đã lưu của mọi thí sinh?",
+            QMessageBox.Yes | QMessageBox.No,
+        ) == QMessageBox.Yes:
+            self._pending[self.service.end_room(room_id)] = "end"
+            self.notice.setText("Đang kết thúc phòng…")
+
     def _render(self) -> None:
         self.table.setRowCount(len(self.rooms))
         status_column_width = 0
@@ -280,8 +290,12 @@ class LiveRoomsPage(QWidget):
                 lobby.clicked.connect(lambda _checked=False, rid=room_id: self.lobby_requested.emit(rid))
                 action_layout.addWidget(lobby)
             elif status == "RUNNING":
-                button = PrimaryButton("Vào thi")
-                button.clicked.connect(lambda _checked=False, rid=room_id: self.exam_requested.emit(rid))
+                if _safe_int(room.get("owner_id")) == self.user.id:
+                    button = SecondaryButton("Kết thúc phòng")
+                    button.clicked.connect(lambda _checked=False, rid=room_id: self._end(rid))
+                else:
+                    button = PrimaryButton("Vào thi")
+                    button.clicked.connect(lambda _checked=False, rid=room_id: self.exam_requested.emit(rid))
                 action_layout.addWidget(button)
             elif status == "ENDED":
                 button = SecondaryButton("Kết quả")
@@ -320,7 +334,10 @@ class LiveRoomsPage(QWidget):
         except ValueError as error:
             self.notice.setText(str(error))
             return
-        messages = {"create": "Đã tạo phòng.", "join": "Đã tham gia phòng.", "start": "Phòng đã bắt đầu."}
+        messages = {
+            "create": "Đã tạo phòng.", "join": "Đã tham gia phòng.",
+            "start": "Phòng đã bắt đầu.", "end": "Phòng đã kết thúc và các bài đã được chấm.",
+        }
         message = messages.get(action, "Đã hoàn tất.")
         self.notice.setText(message)
         show_toast(self, message)
@@ -404,6 +421,24 @@ class LivePracticePage(QWidget):
             self.notice.setText(f"Không thể bắt đầu: {message}")
 
 
+class _ExamOption(QRadioButton):
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.setObjectName("answerOption")
+        self.setAccessibleName(text)
+        label = QLabel(text)
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(45, 13, 13, 13)
+        layout.addWidget(label)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def hitButton(self, position: QPoint) -> bool:
+        return self.rect().contains(position)
+
+
 class LiveExamPage(QWidget):
     submitted = Signal(object, bool, int)
     back_requested = Signal()
@@ -416,9 +451,14 @@ class LiveExamPage(QWidget):
         self.attempt_id = 0
         self.questions: list[dict[str, Any]] = []
         self.answers: dict[int, int] = {}
+        self.saved_answers: dict[int, int] = {}
         self.current_index = 0
-        self._pending: dict[str, str] = {}
-        self._ended_at = ""
+        self._pending_saves: dict[str, tuple[int, int]] = {}
+        self._submit_request: str | None = None
+        self._deadline: float | None = None
+        self._expired = False
+        self._finished = False
+        self._answer_group = QButtonGroup(self)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         root = QVBoxLayout(self)
@@ -444,19 +484,27 @@ class LiveExamPage(QWidget):
         content.setObjectName("sectionCard")
         self.content_layout = QVBoxLayout(content)
         self.question_label = QLabel()
+        self.question_label.setTextFormat(Qt.PlainText)
         self.question_label.setWordWrap(True)
         self.question_label.setObjectName("sectionTitle")
         self.content_layout.addWidget(self.question_label)
         self.options_layout = QVBoxLayout()
         self.content_layout.addLayout(self.options_layout)
         self.content_layout.addStretch()
-        body.addWidget(content, 5)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        body.addWidget(scroll, 5)
         root.addLayout(body, 1)
         footer = QHBoxLayout()
-        back = SecondaryButton("← Danh sách phòng")
-        back.clicked.connect(self.back_requested)
-        footer.addWidget(back)
+        self.back_button = SecondaryButton("← Danh sách phòng")
+        self.back_button.clicked.connect(self.back_requested)
+        footer.addWidget(self.back_button)
         footer.addStretch()
+        self.retry_button = SecondaryButton("Lưu lại đáp án")
+        self.retry_button.clicked.connect(self._retry_answer)
+        self.retry_button.hide()
+        footer.addWidget(self.retry_button)
         self.submit_button = PrimaryButton("Nộp bài")
         self.submit_button.clicked.connect(self._submit)
         footer.addWidget(self.submit_button)
@@ -466,30 +514,47 @@ class LiveExamPage(QWidget):
 
     def load_exam(self, data: dict[str, Any], *, practice: bool) -> None:
         raw_questions = data.get("questions")
-        if not isinstance(raw_questions, list) or not all(isinstance(question, dict) for question in raw_questions):
+        if not isinstance(raw_questions, list) or not raw_questions or not all(isinstance(question, dict) for question in raw_questions):
             raise ValueError("Server trả về đề thi không hợp lệ.")
         self.mode = "practice" if practice else "room"
         self.room_id = _safe_int(data.get("room_id"))
         self.attempt_id = _safe_int(data.get("attempt_id"))
         self.questions = raw_questions
         self.answers = {}
-        self._ended_at = str(data.get("ended_at", ""))
+        self._pending_saves.clear()
+        self._submit_request = None
+        self._expired = False
+        self._finished = False
+        self._deadline = None
+        remaining = data.get("remaining_seconds")
+        if isinstance(remaining, int):
+            self._deadline = monotonic() + max(0, remaining)
+        elif isinstance(data.get("ended_at"), str):
+            try:
+                deadline = datetime.strptime(data["ended_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                self._deadline = monotonic() + (deadline - datetime.now(timezone.utc)).total_seconds()
+            except ValueError:
+                pass
         selected_key = "selected_option_position" if practice else "selected_option_id"
         for question in self.questions:
             question_id = _safe_int(question.get("id"))
             selected = question.get(selected_key)
             if question_id > 0 and isinstance(selected, int):
                 self.answers[question_id] = selected
+        self.saved_answers = self.answers.copy()
         self.title.setText("Luyện tập" if practice else "Làm bài thi phòng")
+        self.back_button.setText("← Luyện tập" if practice else "← Danh sách phòng")
         self.navigator.blockSignals(True)
         self.navigator.clear()
         for index, question in enumerate(self.questions, start=1):
             marker = " ✓" if _safe_int(question.get("id")) in self.answers else ""
             self.navigator.addItem(f"Câu {index}{marker}", index - 1)
+        self.navigator.setCurrentIndex(0)
         self.navigator.blockSignals(False)
         self.current_index = 0
+        self.submit_button.setText("Nộp bài")
         self._render_question()
-        self.submit_button.setEnabled(True)
+        self._update_controls()
         self.notice.setText("Chọn đáp án để tự động lưu trên server.")
         self.timer.start(1000)
         self._tick()
@@ -498,6 +563,7 @@ class LiveExamPage(QWidget):
         if 0 <= index < len(self.questions):
             self.current_index = index
             self._render_question()
+            self._update_controls()
 
     def _render_question(self) -> None:
         if not self.questions:
@@ -510,8 +576,10 @@ class LiveExamPage(QWidget):
         while self.options_layout.count():
             item = self.options_layout.takeAt(0)
             if item.widget() is not None:
+                item.widget().hide()
                 item.widget().deleteLater()
-        group = QButtonGroup(self)
+        for button in self._answer_group.buttons():
+            self._answer_group.removeButton(button)
         raw_options = question.get("options")
         if not isinstance(raw_options, list):
             self.notice.setText("Dữ liệu đáp án không hợp lệ.")
@@ -524,9 +592,8 @@ class LiveExamPage(QWidget):
                 continue
             label = str(raw_option.get("label", ""))
             content = str(raw_option.get("content", ""))
-            button = QRadioButton(f"{label}. {content}")
-            button.setObjectName("answerOption")
-            group.addButton(button, value)
+            button = _ExamOption(f"{label}. {content}")
+            self._answer_group.addButton(button, value)
             if self.answers.get(question_id) == value:
                 button.setChecked(True)
             button.toggled.connect(
@@ -536,72 +603,152 @@ class LiveExamPage(QWidget):
         self.options_layout.addStretch()
 
     def _answer_selected(self, question_id: int, value: int, checked: bool) -> None:
-        if not checked or question_id <= 0 or not self.submit_button.isEnabled():
+        if not checked or question_id <= 0 or self._expired or self._finished or self._submit_request:
             return
         self.answers[question_id] = value
-        self.navigator.setItemText(self.current_index, f"Câu {self.current_index + 1} ✓")
+        self._save_answer(question_id, value)
+
+    def _save_answer(self, question_id: int, value: int) -> None:
         if self.mode == "practice":
             request_id = self.service.save_practice_answer(self.attempt_id, question_id, value)
         else:
             request_id = self.service.save_answer(self.room_id, question_id, value)
-        self._pending[request_id] = "save"
-        self.notice.setText("Đang lưu đáp án…")
+        self._pending_saves[request_id] = (question_id, value)
+        self._update_answer_marker(question_id)
+        self._update_controls()
+        self.notice.setText("?ang l?u ??p ?n?")
+
+    def _update_answer_marker(self, question_id: int) -> None:
+        pending = any(qid == question_id for qid, _ in self._pending_saves.values())
+        if pending:
+            marker = " ?"
+        elif question_id not in self.answers:
+            marker = ""
+        elif self.saved_answers.get(question_id) == self.answers[question_id]:
+            marker = " ?"
+        else:
+            marker = " !"
+        for index, question in enumerate(self.questions):
+            if question.get("id") == question_id:
+                self.navigator.setItemText(index, f"C?u {index + 1}{marker}")
+                break
+
+    def _update_controls(self) -> None:
+        available = bool(self.questions) and self._submit_request is None and not self._finished
+        for button in self._answer_group.buttons():
+            button.setEnabled(available and not self._expired)
+        self.submit_button.setEnabled(available and not self._pending_saves)
+        self.retry_button.setVisible(
+            available and not self._expired and not self._pending_saves
+            and self._current_unsaved_answer() is not None
+        )
+
+    def _current_unsaved_answer(self) -> tuple[int, int] | None:
+        if self.questions:
+            question_id = _safe_int(self.questions[self.current_index].get("id"))
+            value = self.answers.get(question_id)
+            if value is not None and self.saved_answers.get(question_id) != value:
+                return question_id, value
+        return None
+
+    def _retry_answer(self) -> None:
+        selected = self._current_unsaved_answer()
+        if selected is not None:
+            self._save_answer(*selected)
 
     def _submit(self) -> None:
-        if not self.questions:
+        if not self.submit_button.isEnabled():
+            return
+        if self._expired:
+            self._send_submission()
             return
         unanswered = len(self.questions) - len(self.answers)
+        unsaved = sum(self.saved_answers.get(qid) != value for qid, value in self.answers.items())
+        message = f"B?n c?n {unanswered} c?u ch?a ch?n."
+        if unsaved:
+            message += f" C? {unsaved} l?a ch?n ch?a ???c x?c nh?n l?u. Server s? ch?m theo ??p ?n ?? l?u."
         if QMessageBox.question(
-            self, "Xác nhận nộp bài",
-            f"Bạn còn {unanswered} câu chưa chọn. Nộp bài ngay?",
+            self, "X?c nh?n n?p b?i", f"{message} N?p b?i ngay?",
             QMessageBox.Yes | QMessageBox.No,
-        ) != QMessageBox.Yes:
+        ) == QMessageBox.Yes and not self._expired and self.submit_button.isEnabled():
+            self._send_submission()
+
+    def _send_submission(self) -> None:
+        if self._submit_request is not None or self._finished or self._pending_saves:
             return
-        request_id = self.service.submit_practice(self.attempt_id) if self.mode == "practice" else self.service.submit_exam(self.room_id)
-        self._pending[request_id] = "submit"
-        self.submit_button.setEnabled(False)
-        self.notice.setText("Server đang chấm bài…")
+        if self.mode == "practice":
+            self._submit_request = self.service.submit_practice(self.attempt_id)
+        else:
+            self._submit_request = self.service.submit_exam(self.room_id)
+        self._update_controls()
+        self.notice.setText("?? h?t gi?. ?ang l?y k?t qu??" if self._expired else "Server ?ang ch?m b?i?")
 
     def _tick(self) -> None:
-        if not self._ended_at:
-            self.countdown.setText("")
+        if self._deadline is None:
+            self.countdown.clear()
             return
-        try:
-            deadline = datetime.strptime(self._ended_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            self.countdown.setText("")
-            return
-        remaining = max(0, int((deadline - datetime.now(timezone.utc)).total_seconds()))
-        self.countdown.setText(f"Còn {remaining // 60:02d}:{remaining % 60:02d}")
+        remaining = max(0, ceil(self._deadline - monotonic()))
+        self.countdown.setText(f"C?n {remaining // 60:02d}:{remaining % 60:02d}")
         if remaining == 0:
-            self.submit_button.setEnabled(False)
-            self.notice.setText("Đã hết giờ; server sẽ tự nộp/chấm theo thời gian của server.")
+            self._expired = True
             self.timer.stop()
+            self.submit_button.setText("L?y k?t qu?")
+            self._update_controls()
+            if self._pending_saves:
+                self.notice.setText("?? h?t gi?. ?ang ch? ph?n h?i l?u ??p ?n?")
+            else:
+                self._send_submission()
 
     def _on_success(self, request_id: str, response: object) -> None:
-        action = self._pending.pop(request_id, None)
-        if action is None:
+        if request_id not in self._pending_saves and request_id != self._submit_request:
             return
         try:
             data = _wire_data(response)
+            if request_id in self._pending_saves and data.get("saved") is not True:
+                raise ValueError("Server ch?a x?c nh?n l?u ??p ?n.")
         except ValueError as error:
-            self.notice.setText(str(error))
+            self._on_failure(request_id, str(error))
             return
-        if action == "save":
-            self.notice.setText("Đã lưu đáp án trên server.")
+        if request_id in self._pending_saves:
+            question_id, value = self._pending_saves.pop(request_id)
+            self.saved_answers[question_id] = value
+            self._update_answer_marker(question_id)
+            self._update_controls()
+            if self._expired:
+                self._send_submission()
+            elif self._pending_saves:
+                self.notice.setText("?ang l?u ??p ?n?")
+            elif any(self.saved_answers.get(qid) != answer for qid, answer in self.answers.items()):
+                self.notice.setText("M?t s? ??p ?n ch?a ???c x?c nh?n l?u. Ch?n c?u ??nh d?u ! ?? l?u l?i.")
+            else:
+                self.notice.setText("?? l?u ??p ?n tr?n server.")
             return
-        if action == "submit":
-            self.timer.stop()
-            self.notice.setText("Đã nộp bài.")
-            self.submitted.emit(data, self.mode == "practice", self.room_id)
+        self._submit_request = None
+        self._finished = True
+        self.timer.stop()
+        self._update_controls()
+        self.notice.setText("?? n?p b?i.")
+        self.submitted.emit(data, self.mode == "practice", self.room_id)
 
     def _on_failure(self, request_id: str, message: str) -> None:
-        action = self._pending.pop(request_id, None)
-        if action is None:
-            return
-        self.notice.setText(f"Không thể {('lưu đáp án' if action == 'save' else 'nộp bài')}: {message}")
-        if action == "submit":
-            self.submit_button.setEnabled(True)
+        pending = self._pending_saves.pop(request_id, None)
+        if pending is not None:
+            self._update_answer_marker(pending[0])
+            self._update_controls()
+            self.notice.setText(f"Kh?ng th? l?u ??p ?n: {message}")
+            if self._expired:
+                self._send_submission()
+        elif request_id == self._submit_request:
+            self._submit_request = None
+            self._update_controls()
+            self.notice.setText(f"Kh?ng th? l?y k?t qu?: {message}" if self._expired else f"Kh?ng th? n?p b?i: {message}")
+
+    def stop(self) -> None:
+        self.timer.stop()
+        self._pending_saves.clear()
+        self._submit_request = None
+        self._finished = True
+        self._update_controls()
 
 
 class LiveLobbyDialog(QDialog):
@@ -1069,7 +1216,9 @@ class LiveMainWindow(QMainWindow):
         self.rooms.lobby_requested.connect(self._request_lobby)
         self.practice.exam_ready.connect(self._open_practice_exam)
         self.exam.submitted.connect(self._show_submission)
-        self.exam.back_requested.connect(lambda: self.show_page("rooms"))
+        self.exam.back_requested.connect(
+            lambda: self.show_page("practice" if self.exam.mode == "practice" else "rooms")
+        )
         self.result.rooms_requested.connect(lambda: self.show_page("rooms"))
         self.profile.profile_updated.connect(self._on_profile_updated)
         self.show_page("dashboard")
@@ -1172,7 +1321,7 @@ class LiveMainWindow(QMainWindow):
         self.show_page("exam")
 
     def _show_submission(self, data: object, practice: bool, _room_id: int) -> None:
-        if isinstance(data, dict):
+        if isinstance(data, dict) and self.pages.currentWidget() is self.exam:
             self.result.show_submission(data, practice=practice)
             self.show_page("result")
 
@@ -1209,6 +1358,8 @@ class LiveMainWindow(QMainWindow):
             self.identity.setText(f"@{display_name}\n{self.user.role}")
 
     def _on_logged_out(self) -> None:
+        self.exam.stop()
+        self._main_pending.clear()
         self.user = None
         self.root.setCurrentWidget(self.auth)
         self.auth.login_password.clear()

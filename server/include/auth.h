@@ -54,7 +54,5 @@ void handle_update_my_profile(kz_connection *conn, const char *request_id,
 void handle_list_rooms(kz_connection *conn, const char *request_id, const char *token);
 void handle_start_room_guard(kz_connection *conn, const char *request_id,
                              const char *token, const char *payload_json);
-void handle_end_room_guard(kz_connection *conn, const char *request_id,
-                           const char *token, const char *payload_json);
 
 #endif

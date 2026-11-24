@@ -721,7 +721,7 @@ void handle_get_my_active_exam(kz_connection *conn, const char *request_id, cons
     char state[32] = {0};
     int duration_seconds = 0;
     char *buf = NULL;
-    size_t buf_cap = 56U * 1024U;
+    const size_t buf_cap = KZ_MAX_NDJSON_RESPONSE_BYTES - 512U;
     size_t used = 0U;
 
     if (!require_session(token, &user, &err_code, &err_msg)) {
@@ -789,8 +789,11 @@ void handle_get_my_active_exam(kz_connection *conn, const char *request_id, cons
             "SELECT question_id, position, content_snapshot "
             "FROM room_questions WHERE room_id = ? ORDER BY position ASC;";
         const char *opt_sql =
-            "SELECT id, label, content, position "
-            "FROM question_options WHERE question_id = ? ORDER BY position ASC;";
+            "SELECT option_id_snapshot, label, content_snapshot, position "
+            "FROM room_question_options WHERE question_id = ?1 AND room_id = ?2 "
+            "UNION ALL SELECT id, label, content, position FROM question_options "
+            "WHERE question_id = ?1 AND NOT EXISTS (SELECT 1 FROM room_question_options "
+            "WHERE question_id = ?1 AND room_id = ?2) ORDER BY position ASC;";
         sqlite3_stmt *q_stmt = NULL;
         bool first_q = true;
 
@@ -800,7 +803,7 @@ void handle_get_my_active_exam(kz_connection *conn, const char *request_id, cons
                 int q_id = sqlite3_column_int(q_stmt, 0);
                 int q_pos = sqlite3_column_int(q_stmt, 1);
                 const char *q_content = (const char *)sqlite3_column_text(q_stmt, 2);
-                char esc_q[2048];
+                char esc_q[2401];
                 int n;
                 sqlite3_stmt *o_stmt = NULL;
                 bool first_opt = true;
@@ -819,6 +822,7 @@ void handle_get_my_active_exam(kz_connection *conn, const char *request_id, cons
 
                 if (sqlite3_prepare_v2(db, opt_sql, -1, &o_stmt, NULL) == SQLITE_OK) {
                     (void)sqlite3_bind_int(o_stmt, 1, q_id);
+                    (void)sqlite3_bind_int(o_stmt, 2, room_id);
                     while (sqlite3_step(o_stmt) == SQLITE_ROW) {
                         int opt_id = sqlite3_column_int(o_stmt, 0);
                         const char *opt_label = (const char *)sqlite3_column_text(o_stmt, 1);
@@ -1183,54 +1187,6 @@ void handle_start_room_guard(kz_connection *conn, const char *request_id,
     {
         char data_json[128];
         snprintf(data_json, sizeof(data_json), "{\"room_id\":%d,\"status\":\"RUNNING\"}", room_id);
-        (void)send_ok_data(conn->socket_fd, request_id, data_json);
-    }
-}
-
-void handle_end_room_guard(kz_connection *conn, const char *request_id,
-                           const char *token, const char *payload_json) {
-    kz_auth_user user;
-    const char *err_code = NULL;
-    const char *err_msg = NULL;
-    int room_id = 0;
-
-    if (!require_session(token, &user, &err_code, &err_msg)) {
-        send_error(conn->socket_fd, request_id, err_code, err_msg);
-        return;
-    }
-    if (!find_json_int_member(payload_json, "room_id", &room_id) || room_id <= 0) {
-        send_error(conn->socket_fd, request_id, "BAD_REQUEST", "room_id must be a positive integer");
-        return;
-    }
-    if (!require_room_owner(&user, room_id, &err_code, &err_msg)) {
-        send_error(conn->socket_fd, request_id, err_code, err_msg);
-        return;
-    }
-    {
-        sqlite3 *db = kz_db_lock();
-        sqlite3_stmt *stmt = NULL;
-        const char *sql =
-            "UPDATE exam_rooms SET status = 'ENDED', ended_at = datetime('now') "
-            "WHERE id = ? AND status = 'RUNNING';";
-        if (db != NULL && sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-            (void)sqlite3_bind_int(stmt, 1, room_id);
-            (void)sqlite3_step(stmt);
-            int changes = sqlite3_changes(db);
-            sqlite3_finalize(stmt);
-            if (changes == 0) {
-                kz_db_unlock();
-                send_error(conn->socket_fd, request_id, "CONFLICT", "Room is not in RUNNING state");
-                return;
-            }
-            char entity_id[32];
-            snprintf(entity_id, sizeof(entity_id), "%d", room_id);
-            kz_log_event_db(db, user.id, "END_ROOM", "exam_room", entity_id, "{}");
-        }
-        kz_db_unlock();
-    }
-    {
-        char data_json[128];
-        snprintf(data_json, sizeof(data_json), "{\"room_id\":%d,\"status\":\"ENDED\"}", room_id);
         (void)send_ok_data(conn->socket_fd, request_id, data_json);
     }
 }

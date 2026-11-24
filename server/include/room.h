@@ -9,6 +9,8 @@ void handle_join_room(kz_connection *conn, const char *request_id,
                       const char *token, const char *payload_json);
 void handle_start_room(kz_connection *conn, const char *request_id,
                        const char *token, const char *payload_json);
+void handle_end_room(kz_connection *conn, const char *request_id,
+                     const char *token, const char *payload_json);
 void handle_get_exam(kz_connection *conn, const char *request_id,
                      const char *token, const char *payload_json);
 void handle_save_answer(kz_connection *conn, const char *request_id,

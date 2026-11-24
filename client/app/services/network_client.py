@@ -37,11 +37,13 @@ class NetworkClient:
     """
 
     max_line_bytes = 64 * 1024
+    max_response_line_bytes = 8 * 1024 * 1024
 
     def __init__(self, host: str = "127.0.0.1", port: int = 5050, timeout: float = 3.0) -> None:
         self.host, self.port, self.timeout = host, port, timeout
         self._connection: socket.socket | None = None
         self._received = bytearray()
+        self._line_scan_start = 0
         self._responses: dict[str, dict[str, Any]] = {}
 
     def __enter__(self) -> "NetworkClient":
@@ -59,6 +61,7 @@ class NetworkClient:
 
         connection, self._connection = self._connection, None
         self._received.clear()
+        self._line_scan_start = 0
         self._responses.clear()
         if connection is None:
             return
@@ -129,8 +132,6 @@ class NetworkClient:
                 if not chunk:
                     raise NetworkClientError("Server closed the connection before a response")
                 self._received.extend(chunk)
-                if len(self._received) > self.max_line_bytes and b"\n" not in self._received:
-                    raise NetworkClientError("Server response exceeds the 64 KiB NDJSON limit")
                 continue
             response = self._decode_response(line)
             response_id = response.get("request_id")
@@ -141,13 +142,17 @@ class NetworkClient:
             self._responses[response_id] = response
 
     def _next_complete_line(self) -> bytes | None:
-        newline_index = self._received.find(b"\n")
+        newline_index = self._received.find(b"\n", self._line_scan_start)
         if newline_index < 0:
+            if len(self._received) >= self.max_response_line_bytes:
+                raise NetworkClientError("Server response exceeds the 8 MiB NDJSON limit")
+            self._line_scan_start = len(self._received)
             return None
+        if newline_index >= self.max_response_line_bytes:
+            raise NetworkClientError("Server response exceeds the 8 MiB NDJSON limit")
         line = bytes(self._received[:newline_index])
         del self._received[: newline_index + 1]
-        if len(line) > self.max_line_bytes:
-            raise NetworkClientError("Server response exceeds the 64 KiB NDJSON limit")
+        self._line_scan_start = 0
         return line
 
     @staticmethod

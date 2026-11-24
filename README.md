@@ -25,20 +25,24 @@ sudo apt install -y build-essential libsqlite3-dev libssl-dev python3 python3-ve
 
 ### Windows PowerShell
 
+Từ thư mục gốc dự án, mở terminal cho server.
+
 ```powershell
-.\scripts\reset_demo.ps1   # chỉ chạy khi server đang dừng
-mingw32-make
+if (-not (Test-Path server/data/exam.db)) { python scripts/seed_db.py }
 mingw32-make run
 ```
 
-Mở terminal khác từ thư mục gốc:
+Giữ terminal server mở. Trong một terminal khác ở thư mục gốc, tạo môi trường
+client và cài thư viện một lần. Dùng Python 3.13 đã cài qua Python Launcher.
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python main.py
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
 ```
+
+Từ lần sau, chạy `mingw32-make run` ở terminal server và
+`.\.venv\Scripts\python.exe main.py` ở terminal client.
 
 ### Ubuntu/macOS
 
@@ -61,12 +65,12 @@ Server mặc định bind `0.0.0.0:5050`; client mặc định kết nối `127.
 
 ## Kiểm thử
 
-```bash
-mingw32-make test       # Windows
-python -m pytest client/tests -q
+```powershell
+mingw32-make test
+.\.venv\Scripts\python.exe -m pytest client/tests -q
 ```
 
-Trên Unix thay `mingw32-make` bằng `make`. Bộ kiểm thử server bao gồm framing, auth/session, ngân hàng câu hỏi, phòng thi, luyện tập, analytics và gói Reliability (`server/tests/test_phase2_reliability.py`: rate limiting, phân quyền chủ phòng, reconnect `GET_MY_ACTIVE_EXAM`, stress test 15 client đồng thời và idle socket timeout). Kế hoạch test và luồng trình diễn nằm tại [docs/test-plan.md](docs/test-plan.md) và [docs/demo-script.md](docs/demo-script.md).
+Trên Unix chạy `make test` và `python -m pytest client/tests -q` trong môi trường ảo đã cài thư viện. Bộ kiểm thử server bao gồm framing, auth/session, ngân hàng câu hỏi, phòng thi, luyện tập, analytics và gói Reliability (`server/tests/test_phase2_reliability.py`: rate limiting, phân quyền chủ phòng, reconnect `GET_MY_ACTIVE_EXAM`, stress test 15 client đồng thời và idle socket timeout). Kế hoạch test và luồng trình diễn nằm tại [docs/test-plan.md](docs/test-plan.md) và [docs/demo-script.md](docs/demo-script.md).
 
 ## Reset dữ liệu demo
 

@@ -2,9 +2,9 @@
 
 ## Transport
 
-Server mặc định bind tại `0.0.0.0:5050`. TCP là byte stream, vì vậy mỗi connection phải giữ buffer riêng. Một message là **một JSON object UTF-8 kết thúc bằng đúng một `\n`**; giới hạn mỗi dòng là 64 KiB. Không dùng binary header, opcode, hoặc giả định một lần `recv()` tương ứng một message.
+Server mặc định bind tại `0.0.0.0:5050`. TCP là byte stream, vì vậy mỗi connection phải giữ buffer riêng. Một message là **một JSON object UTF-8 kết thúc bằng đúng một `\n`**. Giới hạn request là 64 KiB. Response có thể dài đến 8 MiB để chứa đề thi và phần xem lại. Không dùng binary header, opcode, hoặc giả định một lần `recv()` tương ứng một message.
 
-Server phải tách được một JSON bị chia ở nhiều lần nhận và nhiều JSON đến trong cùng lần nhận. Một dòng quá 64 KiB hoặc không phải JSON object nhận response lỗi mà không làm crash server.
+Server phải tách được một JSON bị chia ở nhiều lần nhận và nhiều JSON đến trong cùng lần nhận. Server trả lỗi khi nhận request quá 64 KiB hoặc sai định dạng JSON object.
 
 ## Envelope
 
@@ -222,9 +222,9 @@ Response lỗi khi không phải chủ phòng:
 {"type":"ERROR","request_id":"start-001","error":{"code":"FORBIDDEN","message":"Only the room owner can perform this action"}}
 ```
 
-`END_ROOM` hiện vẫn là API guard quyền chủ phòng. Ngoài ra, worker server chạy
-mỗi giây sẽ tự chấm các participant `JOINED`/`IN_PROGRESS` khi `ended_at` qua,
-gán `AUTO_SUBMITTED` và chuyển room sang `ENDED` trong transaction.
+`END_ROOM` cho phép chủ phòng kết thúc sớm với payload `{"room_id":1}`. Server
+tự chấm các participant `JOINED`/`IN_PROGRESS`, gán `AUTO_SUBMITTED` và chuyển
+phòng sang `ENDED` trong cùng transaction. Worker dùng cùng logic khi hết giờ.
 
 ---
 
@@ -233,6 +233,7 @@ gán `AUTO_SUBMITTED` và chuyển room sang `ENDED` trong transaction.
 Chỉ participant của room đang `RUNNING` được lấy đề. Server trả từ bảng
 snapshot, không đọc lại câu hỏi/lựa chọn gốc và không trả đáp án đúng. Đáp án
 đã lưu của chính caller (nếu có) được trả tại `selected_option_id`.
+`remaining_seconds` là số giây còn lại tại thời điểm server tạo phản hồi.
 
 ```json
 {"type":"GET_EXAM","request_id":"exam-001","token":"<student-token>","payload":{"room_id":1}}
@@ -441,7 +442,7 @@ server trả `CONFLICT` và không tạo phiên.
 {"type":"START_PRACTICE","request_id":"practice-start-001","token":"<session-token>","payload":{"topic":"TCP Socket","difficulty":"easy","question_count":3,"duration_seconds":600}}
 ```
 
-Response trả `attempt_id` và `questions`; mỗi question có `id`, `position`,
+Response trả `attempt_id`, `ended_at`, `remaining_seconds` và `questions`. Mỗi question có `id`, `position`,
 `content` và bốn option gồm `position`, `label`, `content`.
 
 ## `SAVE_PRACTICE_ANSWER`
@@ -458,9 +459,9 @@ attempt đã hết hạn nhận `BAD_REQUEST` hoặc `CONFLICT` tương ứng.
 
 ## `SUBMIT_PRACTICE`
 
-Chấm attempt ở server theo snapshot. Nếu user submit sau `ended_at`, state là
-`AUTO_SUBMITTED`. Request idempotent: gọi lại trả lại kết quả đã chấm, không
-ghi thêm history.
+Chấm attempt ở server theo snapshot. Worker tự chấm attempt hết hạn với state
+`AUTO_SUBMITTED`, kể cả khi client đã ngắt kết nối. Gọi lại API trả kết quả đã
+chấm và không ghi thêm history.
 
 ```json
 {"type":"SUBMIT_PRACTICE","request_id":"practice-submit-001","token":"<session-token>","payload":{"attempt_id":1}}

@@ -17,8 +17,9 @@ def _read_line(connection: socket.socket) -> dict[str, object]:
     return json.loads(received.split(b"\n", 1)[0].decode("utf-8"))
 
 
-def test_network_client_reuses_connection_and_handles_split_ndjson_response() -> None:
+def test_network_client_reuses_connection_and_handles_split_and_large_responses() -> None:
     accepted_connections: list[int] = []
+    exam_data = {"content": "q" * (70 * 1024)}
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
@@ -42,7 +43,7 @@ def test_network_client_reuses_connection_and_handles_split_ndjson_response() ->
                 second = _read_line(connection)
                 second_response = (
                     json.dumps(
-                        {"type": "OK", "request_id": second["request_id"], "data": {"sequence": 2}}
+                        {"type": "OK", "request_id": second["request_id"], "data": exam_data}
                     ).encode("utf-8")
                     + b"\n"
                 )
@@ -55,7 +56,7 @@ def test_network_client_reuses_connection_and_handles_split_ndjson_response() ->
     client = NetworkClient(str(host), int(port), timeout=2)
     try:
         assert client.request("PING", request_id="first")["data"] == {"sequence": 1}
-        assert client.request("PING", request_id="second")["data"] == {"sequence": 2}
+        assert client.request("GET_EXAM", request_id="second")["data"] == exam_data
     finally:
         client.close()
     server_thread.join(timeout=2)
