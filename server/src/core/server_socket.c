@@ -12,6 +12,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/time.h>
+#endif
 
 static volatile sig_atomic_t g_running = 1;
 static kz_socket_t g_listening_socket = KZ_INVALID_SOCKET;
@@ -77,6 +80,8 @@ void handle_message(kz_connection *conn, const char *line) {
         handle_logout(conn, request_id, token);
     } else if (strcmp(type, "GET_MY_PROFILE") == 0) {
         handle_get_my_profile(conn, request_id, token);
+    } else if (strcmp(type, "GET_MY_ACTIVE_EXAM") == 0) {
+        handle_get_my_active_exam(conn, request_id, token);
     } else if (strcmp(type, "LIST_ROOMS") == 0) {
         handle_list_rooms(conn, request_id, token);
     } else if (strcmp(type, "START_ROOM") == 0) {
@@ -98,6 +103,34 @@ void handle_message(kz_connection *conn, const char *line) {
     free(payload_json);
 }
 
+static int get_idle_timeout_sec(void) {
+    const char *env_val = getenv("KUIZUHUB_IDLE_TIMEOUT_SEC");
+    char *end = NULL;
+    long parsed;
+
+    if (env_val == NULL || env_val[0] == '\0') {
+        return KZ_SOCKET_IDLE_TIMEOUT_SEC;
+    }
+    parsed = strtol(env_val, &end, 10);
+    if (end == env_val || *end != '\0' || parsed < 1L || parsed > 86400L) {
+        return KZ_SOCKET_IDLE_TIMEOUT_SEC;
+    }
+    return (int)parsed;
+}
+
+static void set_socket_recv_timeout(kz_socket_t fd, int seconds) {
+#ifdef _WIN32
+    DWORD timeout_ms = (DWORD)(seconds * 1000);
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                     (const char *)&timeout_ms, sizeof(timeout_ms));
+#else
+    struct timeval tv;
+    tv.tv_sec = seconds;
+    tv.tv_usec = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+}
+
 static void *client_worker(void *argument) {
     client_accept_info *info = (client_accept_info *)argument;
     kz_connection *conn = (kz_connection *)malloc(sizeof(*conn));
@@ -109,6 +142,7 @@ static void *client_worker(void *argument) {
         return NULL;
     }
 
+    set_socket_recv_timeout(info->socket_fd, get_idle_timeout_sec());
     connection_init(conn, info->socket_fd, info->peer_ip, info->peer_port);
     free(info);
 

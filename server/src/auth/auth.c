@@ -7,13 +7,106 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define KZ_SALT_BYTES 16U
 #define KZ_DK_BYTES 32U
 #define KZ_RAW_TOKEN_BYTES 32U
+#define KZ_RATE_LIMIT_BUCKETS 256U
+
+typedef struct {
+    char key[96];
+    int failed_count;
+    time_t window_start;
+    bool in_use;
+} kz_rate_bucket;
+
+static kz_rate_bucket g_rate_buckets[KZ_RATE_LIMIT_BUCKETS];
+static pthread_mutex_t g_rate_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static kz_rate_bucket *find_or_alloc_bucket(const char *key, time_t now) {
+    kz_rate_bucket *empty_slot = NULL;
+    kz_rate_bucket *oldest_slot = &g_rate_buckets[0];
+
+    for (size_t i = 0; i < KZ_RATE_LIMIT_BUCKETS; i++) {
+        kz_rate_bucket *b = &g_rate_buckets[i];
+        if (!b->in_use) {
+            if (empty_slot == NULL) {
+                empty_slot = b;
+            }
+            continue;
+        }
+        if (strcmp(b->key, key) == 0) {
+            if (difftime(now, b->window_start) >= (double)KZ_RATE_LIMIT_WINDOW_SEC) {
+                b->failed_count = 0;
+                b->window_start = now;
+            }
+            return b;
+        }
+        if (b->window_start < oldest_slot->window_start) {
+            oldest_slot = b;
+        }
+    }
+
+    kz_rate_bucket *target = (empty_slot != NULL) ? empty_slot : oldest_slot;
+    memset(target, 0, sizeof(*target));
+    strncpy(target->key, key, sizeof(target->key) - 1U);
+    target->window_start = now;
+    target->in_use = true;
+    return target;
+}
+
+static bool rate_limit_is_blocked(const char *ip, const char *username) {
+    char ip_key[96];
+    char user_key[96];
+    time_t now = time(NULL);
+    bool blocked = false;
+
+    snprintf(ip_key, sizeof(ip_key), "ip:%s", (ip != NULL && ip[0] != '\0') ? ip : "unknown");
+    snprintf(user_key, sizeof(user_key), "user:%s", (username != NULL) ? username : "");
+
+    pthread_mutex_lock(&g_rate_limit_mutex);
+    kz_rate_bucket *b_ip = find_or_alloc_bucket(ip_key, now);
+    kz_rate_bucket *b_user = find_or_alloc_bucket(user_key, now);
+    if (b_user->failed_count >= KZ_RATE_LIMIT_USER_MAX ||
+        b_ip->failed_count >= KZ_RATE_LIMIT_IP_MAX) {
+        blocked = true;
+    }
+    pthread_mutex_unlock(&g_rate_limit_mutex);
+    return blocked;
+}
+
+static void rate_limit_record_failure(const char *ip, const char *username) {
+    char ip_key[96];
+    char user_key[96];
+    time_t now = time(NULL);
+
+    snprintf(ip_key, sizeof(ip_key), "ip:%s", (ip != NULL && ip[0] != '\0') ? ip : "unknown");
+    snprintf(user_key, sizeof(user_key), "user:%s", (username != NULL) ? username : "");
+
+    pthread_mutex_lock(&g_rate_limit_mutex);
+    find_or_alloc_bucket(ip_key, now)->failed_count++;
+    find_or_alloc_bucket(user_key, now)->failed_count++;
+    pthread_mutex_unlock(&g_rate_limit_mutex);
+}
+
+static void rate_limit_reset(const char *ip, const char *username) {
+    char ip_key[96];
+    char user_key[96];
+    time_t now = time(NULL);
+
+    snprintf(ip_key, sizeof(ip_key), "ip:%s", (ip != NULL && ip[0] != '\0') ? ip : "unknown");
+    snprintf(user_key, sizeof(user_key), "user:%s", (username != NULL) ? username : "");
+
+    pthread_mutex_lock(&g_rate_limit_mutex);
+    find_or_alloc_bucket(user_key, now)->failed_count = 0;
+    (void)ip_key;
+    pthread_mutex_unlock(&g_rate_limit_mutex);
+}
 
 static void bytes_to_hex(const unsigned char *bytes, size_t len, char *out_hex) {
     static const char hex_chars[] = "0123456789abcdef";
@@ -421,6 +514,16 @@ void handle_login(kz_connection *conn, const char *request_id, const char *paylo
 
     json_escape(username, escaped_username, sizeof(escaped_username));
 
+    if (rate_limit_is_blocked(conn->peer_ip, username)) {
+        snprintf(detail_json, sizeof(detail_json),
+                 "{\"username\":\"%s\",\"ip\":\"%s\",\"reason\":\"rate_limited\"}",
+                 escaped_username, conn->peer_ip);
+        kz_log_event(0, "LOGIN_RATE_LIMITED", "user", escaped_username, detail_json);
+        send_error(conn->socket_fd, request_id, "UNAUTHORIZED",
+                   "Too many failed login attempts. Try again later");
+        return;
+    }
+
     db = kz_db_lock();
     if (db == NULL || sqlite3_prepare_v2(db, select_sql, -1, &stmt, NULL) != SQLITE_OK) {
         kz_db_unlock();
@@ -430,6 +533,7 @@ void handle_login(kz_connection *conn, const char *request_id, const char *paylo
     (void)sqlite3_bind_text(stmt, 1, username, -1, SQLITE_STATIC);
     if (sqlite3_step(stmt) != SQLITE_ROW) {
         sqlite3_finalize(stmt);
+        rate_limit_record_failure(conn->peer_ip, username);
         snprintf(detail_json, sizeof(detail_json),
                  "{\"username\":\"%s\",\"reason\":\"user_not_found\"}", escaped_username);
         kz_log_event_db(db, 0, "LOGIN_FAILED", "user", escaped_username, detail_json);
@@ -446,6 +550,7 @@ void handle_login(kz_connection *conn, const char *request_id, const char *paylo
 
     snprintf(entity_id, sizeof(entity_id), "%d", user_id);
     if (!kz_verify_password(password, db_hash)) {
+        rate_limit_record_failure(conn->peer_ip, username);
         snprintf(detail_json, sizeof(detail_json),
                  "{\"username\":\"%s\",\"reason\":\"wrong_password\"}", escaped_username);
         kz_log_event_db(db, user_id, "LOGIN_FAILED", "user", entity_id, detail_json);
@@ -453,6 +558,8 @@ void handle_login(kz_connection *conn, const char *request_id, const char *paylo
         send_error(conn->socket_fd, request_id, "UNAUTHORIZED", "Invalid username or password");
         return;
     }
+
+    rate_limit_reset(conn->peer_ip, username);
 
     if (RAND_bytes(raw_token, (int)sizeof(raw_token)) != 1) {
         kz_db_unlock();
@@ -554,6 +661,205 @@ void handle_get_my_profile(kz_connection *conn, const char *request_id, const ch
              "{\"user\":{\"id\":%d,\"username\":\"%s\",\"role\":\"%s\",\"created_at\":\"%s\"}}",
              user.id, escaped_username, user.role, escaped_created);
     (void)send_ok_data(conn->socket_fd, request_id, data_json);
+}
+
+void handle_get_my_active_exam(kz_connection *conn, const char *request_id, const char *token) {
+    kz_auth_user user;
+    const char *err_code = NULL;
+    const char *err_msg = NULL;
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    const char *room_sql =
+        "SELECT r.id, r.name, r.started_at, r.ended_at, r.duration_seconds, rp.state "
+        "FROM room_participants rp "
+        "JOIN exam_rooms r ON r.id = rp.room_id "
+        "WHERE rp.user_id = ? AND r.status = 'RUNNING' "
+        "  AND rp.state IN ('JOINED', 'IN_PROGRESS') "
+        "ORDER BY r.started_at DESC, r.id DESC LIMIT 1;";
+    int room_id = 0;
+    char room_name[128] = {0};
+    char started_at[64] = {0};
+    char ended_at[64] = {0};
+    char state[32] = {0};
+    int duration_seconds = 0;
+    char *buf = NULL;
+    size_t buf_cap = 56U * 1024U;
+    size_t used = 0U;
+
+    if (!require_session(token, &user, &err_code, &err_msg)) {
+        send_error(conn->socket_fd, request_id, err_code, err_msg);
+        return;
+    }
+
+    db = kz_db_lock();
+    if (db == NULL || sqlite3_prepare_v2(db, room_sql, -1, &stmt, NULL) != SQLITE_OK) {
+        kz_db_unlock();
+        send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Database error");
+        return;
+    }
+    (void)sqlite3_bind_int(stmt, 1, user.id);
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        kz_db_unlock();
+        (void)send_ok_data(conn->socket_fd, request_id, "{\"active_exam\":null}");
+        return;
+    }
+
+    room_id = sqlite3_column_int(stmt, 0);
+    if (sqlite3_column_text(stmt, 1) != NULL) {
+        strncpy(room_name, (const char *)sqlite3_column_text(stmt, 1), sizeof(room_name) - 1U);
+    }
+    if (sqlite3_column_text(stmt, 2) != NULL) {
+        strncpy(started_at, (const char *)sqlite3_column_text(stmt, 2), sizeof(started_at) - 1U);
+    }
+    if (sqlite3_column_text(stmt, 3) != NULL) {
+        strncpy(ended_at, (const char *)sqlite3_column_text(stmt, 3), sizeof(ended_at) - 1U);
+    }
+    duration_seconds = sqlite3_column_int(stmt, 4);
+    if (sqlite3_column_text(stmt, 5) != NULL) {
+        strncpy(state, (const char *)sqlite3_column_text(stmt, 5), sizeof(state) - 1U);
+    }
+    sqlite3_finalize(stmt);
+
+    buf = (char *)malloc(buf_cap);
+    if (buf == NULL) {
+        kz_db_unlock();
+        send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Out of memory");
+        return;
+    }
+
+    {
+        char esc_name[256], esc_start[128], esc_end[128], esc_state[64];
+        int n;
+        json_escape(room_name, esc_name, sizeof(esc_name));
+        json_escape(started_at, esc_start, sizeof(esc_start));
+        json_escape(ended_at, esc_end, sizeof(esc_end));
+        json_escape(state, esc_state, sizeof(esc_state));
+        n = snprintf(buf + used, buf_cap - used,
+                     "{\"active_exam\":{\"room_id\":%d,\"room_name\":\"%s\","
+                     "\"started_at\":\"%s\",\"ended_at\":\"%s\","
+                     "\"duration_seconds\":%d,\"state\":\"%s\",\"questions\":[",
+                     room_id, esc_name, esc_start, esc_end, duration_seconds, esc_state);
+        if (n > 0 && (size_t)n < buf_cap - used) {
+            used += (size_t)n;
+        }
+    }
+
+    /* Load snapshot questions without correct_option_snapshot */
+    {
+        const char *q_sql =
+            "SELECT question_id, position, content_snapshot "
+            "FROM room_questions WHERE room_id = ? ORDER BY position ASC;";
+        const char *opt_sql =
+            "SELECT id, label, content, position "
+            "FROM question_options WHERE question_id = ? ORDER BY position ASC;";
+        sqlite3_stmt *q_stmt = NULL;
+        bool first_q = true;
+
+        if (sqlite3_prepare_v2(db, q_sql, -1, &q_stmt, NULL) == SQLITE_OK) {
+            (void)sqlite3_bind_int(q_stmt, 1, room_id);
+            while (sqlite3_step(q_stmt) == SQLITE_ROW) {
+                int q_id = sqlite3_column_int(q_stmt, 0);
+                int q_pos = sqlite3_column_int(q_stmt, 1);
+                const char *q_content = (const char *)sqlite3_column_text(q_stmt, 2);
+                char esc_q[2048];
+                int n;
+                sqlite3_stmt *o_stmt = NULL;
+                bool first_opt = true;
+
+                json_escape(q_content ? q_content : "", esc_q, sizeof(esc_q));
+                if (used + 512U >= buf_cap) {
+                    break;
+                }
+                n = snprintf(buf + used, buf_cap - used,
+                             "%s{\"question_id\":%d,\"position\":%d,\"content\":\"%s\",\"options\":[",
+                             first_q ? "" : ",", q_id, q_pos, esc_q);
+                if (n > 0 && (size_t)n < buf_cap - used) {
+                    used += (size_t)n;
+                }
+                first_q = false;
+
+                if (sqlite3_prepare_v2(db, opt_sql, -1, &o_stmt, NULL) == SQLITE_OK) {
+                    (void)sqlite3_bind_int(o_stmt, 1, q_id);
+                    while (sqlite3_step(o_stmt) == SQLITE_ROW) {
+                        int opt_id = sqlite3_column_int(o_stmt, 0);
+                        const char *opt_label = (const char *)sqlite3_column_text(o_stmt, 1);
+                        const char *opt_content = (const char *)sqlite3_column_text(o_stmt, 2);
+                        int opt_pos = sqlite3_column_int(o_stmt, 3);
+                        char esc_lbl[16], esc_opt[1024];
+
+                        json_escape(opt_label ? opt_label : "", esc_lbl, sizeof(esc_lbl));
+                        json_escape(opt_content ? opt_content : "", esc_opt, sizeof(esc_opt));
+                        if (used + 256U >= buf_cap) {
+                            break;
+                        }
+                        n = snprintf(buf + used, buf_cap - used,
+                                     "%s{\"id\":%d,\"label\":\"%s\",\"content\":\"%s\",\"position\":%d}",
+                                     first_opt ? "" : ",", opt_id, esc_lbl, esc_opt, opt_pos);
+                        if (n > 0 && (size_t)n < buf_cap - used) {
+                            used += (size_t)n;
+                        }
+                        first_opt = false;
+                    }
+                    sqlite3_finalize(o_stmt);
+                }
+
+                n = snprintf(buf + used, buf_cap - used, "]}");
+                if (n > 0 && (size_t)n < buf_cap - used) {
+                    used += (size_t)n;
+                }
+            }
+            sqlite3_finalize(q_stmt);
+        }
+    }
+
+    {
+        int n = snprintf(buf + used, buf_cap - used, "],\"saved_answers\":[");
+        if (n > 0 && (size_t)n < buf_cap - used) {
+            used += (size_t)n;
+        }
+    }
+
+    /* Load saved answers for this participant */
+    {
+        const char *ans_sql =
+            "SELECT question_id, selected_option_id "
+            "FROM attempt_answers WHERE room_id = ? AND user_id = ? ORDER BY question_id ASC;";
+        sqlite3_stmt *a_stmt = NULL;
+        bool first_a = true;
+
+        if (sqlite3_prepare_v2(db, ans_sql, -1, &a_stmt, NULL) == SQLITE_OK) {
+            (void)sqlite3_bind_int(a_stmt, 1, room_id);
+            (void)sqlite3_bind_int(a_stmt, 2, user.id);
+            while (sqlite3_step(a_stmt) == SQLITE_ROW) {
+                int q_id = sqlite3_column_int(a_stmt, 0);
+                int sel_id = sqlite3_column_int(a_stmt, 1);
+                int n;
+                if (used + 128U >= buf_cap) {
+                    break;
+                }
+                n = snprintf(buf + used, buf_cap - used,
+                             "%s{\"question_id\":%d,\"selected_option_id\":%d}",
+                             first_a ? "" : ",", q_id, sel_id);
+                if (n > 0 && (size_t)n < buf_cap - used) {
+                    used += (size_t)n;
+                }
+                first_a = false;
+            }
+            sqlite3_finalize(a_stmt);
+        }
+    }
+
+    {
+        char entity_id[32];
+        snprintf(entity_id, sizeof(entity_id), "%d", room_id);
+        kz_log_event_db(db, user.id, "RECONNECT_EXAM", "exam_room", entity_id, "{}");
+    }
+    kz_db_unlock();
+
+    (void)snprintf(buf + used, buf_cap - used, "]}}");
+    (void)send_ok_data(conn->socket_fd, request_id, buf);
+    free(buf);
 }
 
 void handle_list_rooms(kz_connection *conn, const char *request_id, const char *token) {

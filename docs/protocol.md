@@ -113,6 +113,8 @@ Response lỗi khi sai mật khẩu hoặc không tồn tại tài khoản:
 {"type":"ERROR","request_id":"login-001","error":{"code":"UNAUTHORIZED","message":"Invalid username or password"}}
 ```
 
+**Rate Limiting:** Server giới hạn tối đa **5 lần đăng nhập sai / 60 giây** trên mỗi `username` (và 20 lần/phút trên mỗi IP). Vượt ngưỡng sẽ trả về `UNAUTHORIZED` kèm thông báo `"Too many failed login attempts. Try again later"` và ghi log `LOGIN_RATE_LIMITED`.
+
 ---
 
 ### 4. `LOGOUT`
@@ -257,4 +259,52 @@ Response thành công:
 
 ```json
 {"type":"OK","request_id":"question-import-001","data":{"imported":1}}
+```
+
+---
+
+## Request Phase 2 — Reliability & Reconnect (Người 1)
+
+### 12. `GET_MY_ACTIVE_EXAM`
+
+Cho phép client sau khi bị mất kết nối mạng (rớt TCP socket) kết nối lại bằng `token` còn hạn để khôi phục bài thi đang làm trong phòng `RUNNING`. Yêu cầu `token` hợp lệ (`UNAUTHORIZED` nếu thiếu/sai/hết hạn). **Tuyệt đối không trả về đáp án đúng.**
+
+Request:
+
+```json
+{"type":"GET_MY_ACTIVE_EXAM","request_id":"reconnect-001","token":"<session-token>","payload":{}}
+```
+
+Response khi đang có bài thi chưa nộp:
+
+```json
+{
+  "type":"OK",
+  "request_id":"reconnect-001",
+  "data":{
+    "active_exam":{
+      "room_id":1,
+      "room_name":"Midterm Network",
+      "started_at":"2026-11-23 02:00:00",
+      "ended_at":"2026-11-23 02:10:00",
+      "duration_seconds":600,
+      "state":"IN_PROGRESS",
+      "questions":[
+        {
+          "question_id":1,
+          "position":1,
+          "content":"Hàm nào tạo một TCP socket trên POSIX?",
+          "options":[{"id":1,"label":"A","content":"socket()","position":1}]
+        }
+      ],
+      "saved_answers":[{"question_id":1,"selected_option_id":1}]
+    }
+  }
+}
+```
+
+Response khi không có phòng nào đang thi:
+
+```json
+{"type":"OK","request_id":"reconnect-001","data":{"active_exam":null}}
 ```

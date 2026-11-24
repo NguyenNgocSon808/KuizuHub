@@ -47,6 +47,7 @@ void handle_register(kz_connection *conn, const char *request_id, const char *pa
 void handle_login(kz_connection *conn, const char *request_id, const char *payload_json);
 void handle_logout(kz_connection *conn, const char *request_id, const char *token);
 void handle_get_my_profile(kz_connection *conn, const char *request_id, const char *token);
+void handle_get_my_active_exam(kz_connection *conn, const char *request_id, const char *token);
 void handle_list_rooms(kz_connection *conn, const char *request_id, const char *token);
 void handle_start_room_guard(kz_connection *conn, const char *request_id,
                              const char *token, const char *payload_json);
