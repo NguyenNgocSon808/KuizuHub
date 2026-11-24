@@ -5,7 +5,7 @@ KuizuHub là hệ thống thi trực tuyến dùng giao thức TCP/NDJSON: C99 +
 ## Phạm vi đã hoàn thiện
 
 - **Chặng 0–1:** khung TCP, đăng ký/đăng nhập, phân quyền và ngân hàng câu hỏi.
-- **Chặng 2:** tạo/join/start phòng, sảnh chờ, đề thi được snapshot, autosave, đồng hồ theo server, nộp bài và xem kết quả sau khi phòng kết thúc.
+- **Chặng 2:** tạo/join/start phòng, sảnh chờ, đề thi được snapshot, autosave, đồng hồ theo server, nộp bài và xem kết quả sau khi phòng kết thúc; cùng gói **Reliability & Security** (Rate Limiting cho `LOGIN`, khôi phục bài thi khi mất kết nối `GET_MY_ACTIVE_EXAM`, timeout nhàn rỗi `SO_RCVTIMEO` cấu hình qua `KUIZUHUB_IDLE_TIMEOUT_SEC`).
 - **Chặng 3:** luyện tập, lịch sử, thống kê theo chủ đề/độ khó, streak, leaderboard, hồ sơ cá nhân và nhập/xuất CSV câu hỏi.
 - **Chặng 4 (đóng gói cốt lõi):** migration có thể lặp lại, seed/reset demo, kiểm thử backend và client, kịch bản demo.
 
@@ -66,7 +66,7 @@ mingw32-make test       # Windows
 python -m pytest client/tests -q
 ```
 
-Trên Unix thay `mingw32-make` bằng `make`. Kế hoạch test và luồng trình diễn nằm tại [docs/test-plan.md](docs/test-plan.md) và [docs/demo-script.md](docs/demo-script.md).
+Trên Unix thay `mingw32-make` bằng `make`. Bộ kiểm thử server bao gồm framing, auth/session, ngân hàng câu hỏi, phòng thi, luyện tập, analytics và gói Reliability (`server/tests/test_phase2_reliability.py`: rate limiting, phân quyền chủ phòng, reconnect `GET_MY_ACTIVE_EXAM`, stress test 15 client đồng thời và idle socket timeout). Kế hoạch test và luồng trình diễn nằm tại [docs/test-plan.md](docs/test-plan.md) và [docs/demo-script.md](docs/demo-script.md).
 
 ## Reset dữ liệu demo
 
