@@ -7,6 +7,7 @@
 typedef struct {
     int id;
     char username[64];
+    char display_name[97];
     char role[16];
     char created_at[32];
     char token_hash[65];
@@ -48,6 +49,8 @@ void handle_login(kz_connection *conn, const char *request_id, const char *paylo
 void handle_logout(kz_connection *conn, const char *request_id, const char *token);
 void handle_get_my_profile(kz_connection *conn, const char *request_id, const char *token);
 void handle_get_my_active_exam(kz_connection *conn, const char *request_id, const char *token);
+void handle_update_my_profile(kz_connection *conn, const char *request_id,
+                              const char *token, const char *payload_json);
 void handle_list_rooms(kz_connection *conn, const char *request_id, const char *token);
 void handle_start_room_guard(kz_connection *conn, const char *request_id,
                              const char *token, const char *payload_json);

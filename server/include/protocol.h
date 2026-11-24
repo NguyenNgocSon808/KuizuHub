@@ -77,6 +77,13 @@ bool find_json_object_member(const char *json, const char *member,
 bool find_json_array_member(const char *json, const char *member,
                             char *output, size_t output_size);
 /**
+ * Decode an array containing only JSON objects into fixed-width slots. Each
+ * slot receives one complete JSON object, including its braces.
+ */
+bool find_json_object_array_member(const char *json, const char *member,
+                                   char *values, size_t value_width,
+                                   size_t value_capacity, size_t *out_count);
+/**
  * Decode an array containing only JSON strings into fixed-width slots.
  * Returns false when the member is missing, malformed, contains a non-string,
  * or has more than `value_capacity` elements.

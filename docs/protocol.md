@@ -148,7 +148,7 @@ Request:
 Response:
 
 ```json
-{"type":"OK","request_id":"prof-001","data":{"user":{"id":1,"username":"son","role":"HOST","created_at":"2026-11-10 00:00:00"}}}
+{"type":"OK","request_id":"prof-001","data":{"user":{"id":1,"username":"son","display_name":"Sơn","role":"HOST","created_at":"2026-11-10 00:00:00"}}}
 ```
 
 ---
@@ -171,9 +171,34 @@ Response:
 
 ---
 
-### 7. `START_ROOM` & `END_ROOM` (Kiểm soát quyền chủ phòng)
+### 7. `JOIN_ROOM`
 
-Yêu cầu `token` hợp lệ và người gọi phải là `owner_id` của phòng (`require_room_owner`). Nếu thí sinh hoặc người không phải chủ phòng gọi sẽ nhận `FORBIDDEN`.
+User đã đăng nhập tham gia một phòng ở trạng thái `WAITING`. Server kiểm tra
+trạng thái và ghi participant trong cùng SQLite transaction; gọi lại với cùng
+`room_id` nhận `CONFLICT` và không tạo bản ghi trùng.
+
+```json
+{"type":"JOIN_ROOM","request_id":"join-001","token":"<session-token>","payload":{"room_id":1}}
+```
+
+Response thành công:
+
+```json
+{"type":"OK","request_id":"join-001","data":{"room_id":1,"status":"WAITING","participant_state":"JOINED","participant_count":2}}
+```
+
+Phòng không tồn tại nhận `NOT_FOUND`; phòng `RUNNING` hoặc `ENDED`, hay user đã
+join, nhận `CONFLICT`.
+
+---
+
+### 8. `START_ROOM` (Bắt đầu phòng và chốt đề)
+
+Yêu cầu `token` hợp lệ và caller là `owner_id` của phòng. Server thực hiện toàn
+bộ lifecycle trong một SQLite transaction: kiểm tra `WAITING`, lấy ngẫu nhiên
+đủ câu theo từng rule, snapshot nội dung câu hỏi/bốn lựa chọn/đáp án đúng nội
+bộ, rồi mới chuyển phòng sang `RUNNING`. Các participant `JOINED` được chuyển
+sang `IN_PROGRESS`.
 
 Request:
 
@@ -181,11 +206,86 @@ Request:
 {"type":"START_ROOM","request_id":"start-001","token":"<session-token>","payload":{"room_id":1}}
 ```
 
+Response thành công:
+
+```json
+{"type":"OK","request_id":"start-001","data":{"room_id":1,"status":"RUNNING","question_count":3,"participants_started":2}}
+```
+
+Nếu snapshot không đầy đủ (thiếu câu active hoặc một câu thiếu lựa chọn), server
+rollback toàn bộ và phòng vẫn là `WAITING`; response là `CONFLICT`. Gọi start
+lần hai cũng nhận `CONFLICT`.
+
 Response lỗi khi không phải chủ phòng:
 
 ```json
 {"type":"ERROR","request_id":"start-001","error":{"code":"FORBIDDEN","message":"Only the room owner can perform this action"}}
 ```
+
+`END_ROOM` hiện vẫn là API guard quyền chủ phòng. Ngoài ra, worker server chạy
+mỗi giây sẽ tự chấm các participant `JOINED`/`IN_PROGRESS` khi `ended_at` qua,
+gán `AUTO_SUBMITTED` và chuyển room sang `ENDED` trong transaction.
+
+---
+
+### 9. `GET_EXAM`
+
+Chỉ participant của room đang `RUNNING` được lấy đề. Server trả từ bảng
+snapshot, không đọc lại câu hỏi/lựa chọn gốc và không trả đáp án đúng. Đáp án
+đã lưu của chính caller (nếu có) được trả tại `selected_option_id`.
+
+```json
+{"type":"GET_EXAM","request_id":"exam-001","token":"<student-token>","payload":{"room_id":1}}
+```
+
+```json
+{"type":"OK","request_id":"exam-001","data":{"room_id":1,"status":"RUNNING","ended_at":"2026-11-22 10:30:00","questions":[{"id":12,"position":1,"content":"...","options":[{"id":45,"position":1,"label":"A","content":"..."}],"selected_option_id":45}]}}
+```
+
+Phòng không tồn tại trả `NOT_FOUND`; room không ở `RUNNING` trả `CONFLICT`; user
+không phải participant trả `FORBIDDEN`.
+
+---
+
+### 10. `SAVE_ANSWER`
+
+Participant đang `IN_PROGRESS` lưu hoặc thay đổi đáp án của một câu trong room
+đang `RUNNING`. Server dùng thời gian SQLite (`ended_at <= datetime('now')`),
+không tin timestamp phía client. `question_id` và `option_id` phải cùng thuộc
+snapshot của room.
+
+```json
+{"type":"SAVE_ANSWER","request_id":"answer-001","token":"<student-token>","payload":{"room_id":1,"question_id":12,"option_id":45}}
+```
+
+Response thành công:
+
+```json
+{"type":"OK","request_id":"answer-001","data":{"saved":true}}
+```
+
+Lưu lại cùng question sẽ UPSERT (ghi đè đáp án cũ). Hết giờ hoặc room không còn
+`RUNNING` nhận `CONFLICT`; option/câu không thuộc snapshot nhận `BAD_REQUEST`.
+
+---
+
+### 11. `SUBMIT_EXAM`
+
+Participant `IN_PROGRESS` nộp bài. Server dùng `BEGIN IMMEDIATE` để chấm theo
+snapshot, cập nhật participant và ghi audit trong một transaction. Gọi lại sau
+khi đã nộp là idempotent: trả đúng kết quả cũ, không chấm hoặc ghi log lần hai.
+
+```json
+{"type":"SUBMIT_EXAM","request_id":"submit-001","token":"<student-token>","payload":{"room_id":1}}
+```
+
+```json
+{"type":"OK","request_id":"submit-001","data":{"room_id":1,"state":"SUBMITTED","correct_count":2,"total":3,"score":6.67}}
+```
+
+Điểm theo thang 10: `correct_count / total * 10`. Nếu submit sau `ended_at`,
+state là `AUTO_SUBMITTED`. Timer tự quét để auto-submit toàn bộ participant quá
+hạn là lifecycle riêng, không thuộc request này.
 
 ---
 
@@ -261,11 +361,219 @@ Response thành công:
 {"type":"OK","request_id":"question-import-001","data":{"imported":1}}
 ```
 
+## `CREATE_ROOM`
+
+Tạo một phòng thi mới.
+
+- Yêu cầu token hợp lệ.
+- Chỉ role `HOST` hoặc `ADMIN` được tạo phòng.
+- Phòng mới luôn có trạng thái `WAITING`.
+- Chủ phòng không tự động là thí sinh. Nếu cần làm bài, chủ phòng gọi `JOIN_ROOM` như user bình thường.
+- `name` không được rỗng và tối đa 100 ký tự.
+- `duration_seconds` là số nguyên từ 60 đến 7200.
+- `rules` có từ 1 đến 16 item. Mỗi item có `topic` không rỗng, `difficulty` là `easy`, `medium` hoặc `hard`, và `quantity` từ 1 đến 50; không lặp cùng cặp `topic` và `difficulty`.
+- Server chỉ tạo phòng khi mỗi rule có đủ số câu hỏi active tương ứng.
+
+Request:
+
+```json
+{
+  "type": "CREATE_ROOM",
+  "request_id": "create-room-001",
+  "token": "<session-token>",
+  "payload": {
+    "name": "Kiểm tra TCP",
+    "duration_seconds": 600,
+    "rules": [
+      {
+        "topic": "TCP Socket",
+        "difficulty": "easy",
+        "quantity": 5
+      },
+      {
+        "topic": "TCP Socket",
+        "difficulty": "medium",
+        "quantity": 5
+      }
+    ]
+  }
+}
+```
+
+Response thành công:
+
+```json
+{
+  "type": "OK",
+  "request_id": "create-room-001",
+  "data": {
+    "room_id": 1,
+    "name": "Kiểm tra TCP",
+    "status": "WAITING",
+    "duration_seconds": 600
+  }
+}
+```
+
+Lỗi ví dụ:
+```json
+{
+  "type": "ERROR",
+  "request_id": "create-room-001",
+  "error": {
+    "code": "CONFLICT",
+    "message": "Not enough active questions for topic TCP Socket, difficulty medium: need 5, available 3"
+  }
+}
+```
+
+## `START_PRACTICE`
+
+Tạo một phiên luyện tập riêng của user đang đăng nhập. Server chọn ngẫu nhiên
+đúng số câu active theo topic/difficulty, snapshot câu hỏi và lựa chọn, nhưng
+không trả đáp án đúng.
+
+Payload cần có `topic`, `difficulty` (`easy`, `medium`, `hard`),
+`question_count` (1-20) và `duration_seconds` (60-7200). Nếu không đủ câu,
+server trả `CONFLICT` và không tạo phiên.
+
+```json
+{"type":"START_PRACTICE","request_id":"practice-start-001","token":"<session-token>","payload":{"topic":"TCP Socket","difficulty":"easy","question_count":3,"duration_seconds":600}}
+```
+
+Response trả `attempt_id` và `questions`; mỗi question có `id`, `position`,
+`content` và bốn option gồm `position`, `label`, `content`.
+
+## `SAVE_PRACTICE_ANSWER`
+
+Lưu hoặc thay đáp án của chủ attempt. Chỉ được gọi khi attempt còn
+`IN_PROGRESS` và chưa hết hạn.
+
+```json
+{"type":"SAVE_PRACTICE_ANSWER","request_id":"practice-save-001","token":"<session-token>","payload":{"attempt_id":1,"question_id":12,"selected_option_position":2}}
+```
+
+Response thành công là `{"saved":true}`. Option không thuộc snapshot hoặc
+attempt đã hết hạn nhận `BAD_REQUEST` hoặc `CONFLICT` tương ứng.
+
+## `SUBMIT_PRACTICE`
+
+Chấm attempt ở server theo snapshot. Nếu user submit sau `ended_at`, state là
+`AUTO_SUBMITTED`. Request idempotent: gọi lại trả lại kết quả đã chấm, không
+ghi thêm history.
+
+```json
+{"type":"SUBMIT_PRACTICE","request_id":"practice-submit-001","token":"<session-token>","payload":{"attempt_id":1}}
+```
+
+Response gồm `attempt_id`, `state`, `correct_count`, `total` và `score` theo
+thang 10.
+
+---
+
+## Request Phase 2–3 — phòng thi, kết quả và analytics (Người 3)
+
+### `GET_ROOM_LOBBY`
+
+Chủ phòng hoặc thí sinh **đã tham gia** xem sảnh chờ và danh sách người tham
+gia. Request này không trả đề thi, đáp án hay token. UI dùng refresh có chủ
+đích; không giả lập realtime bằng dữ liệu local.
+
+```json
+{"type":"GET_ROOM_LOBBY","request_id":"lobby-001","token":"<session-token>","payload":{"room_id":1}}
+```
+
+Response gồm `room` (`id`, `name`, `owner_id`, `status`, `duration_seconds`,
+`started_at`, `ended_at`), `is_owner` và `participants` có `user_id`,
+`display_name`, `state`. User không phải owner/participant nhận `FORBIDDEN`.
+
+### `GET_ROOM_RESULTS`
+
+Kết quả chỉ công bố khi room ở `ENDED`.
+
+```json
+{"type":"GET_ROOM_RESULTS","request_id":"result-001","token":"<session-token>","payload":{"room_id":1}}
+```
+
+- Owner nhận `results` của toàn bộ participant: username, state, thời điểm nộp,
+  số đúng, tổng câu và điểm.
+- Participant chỉ nhận result của chính mình. Nếu caller là participant, response
+  còn có `review` từ snapshot gồm lựa chọn đã chọn, đáp án đúng và trạng thái
+  đúng/sai. Dữ liệu này tuyệt đối không xuất hiện trước `ENDED`.
+- User ngoài room nhận `FORBIDDEN`; room chưa kết thúc nhận `CONFLICT`.
+
+Response có cờ `results_truncated`/`review_truncated` khi response sẽ vượt giới
+hạn NDJSON 64 KiB; client phải báo rõ cho người dùng thay vì coi dữ liệu local là
+đầy đủ.
+
+### `GET_LEADERBOARD`
+
+Mọi user đã đăng nhập có thể xem leaderboard của room đã `ENDED`. Sắp xếp theo
+điểm giảm dần, sau đó thời điểm nộp tăng dần. Payload có `room_id`, `limit`
+(1–50, mặc định 20) và `offset` (mặc định 0).
+
+```json
+{"type":"GET_LEADERBOARD","request_id":"leaderboard-001","token":"<session-token>","payload":{"room_id":1,"limit":20,"offset":0}}
+```
+
+Response có `entries`, `limit`, `offset`, `has_more`. Mỗi entry có `rank`,
+`user_id`, `username`, `state`, `score`, `correct_count`, `total`,
+`submitted_at`. Room chưa `ENDED` nhận `CONFLICT`.
+
+### `GET_MY_HISTORY`
+
+Trả lịch sử bài practice và room exam đã `SUBMITTED`/`AUTO_SUBMITTED` của chính
+caller, theo trang. Payload dùng `limit` 1–50 và `offset` không âm.
+
+```json
+{"type":"GET_MY_HISTORY","request_id":"history-001","token":"<session-token>","payload":{"limit":20,"offset":0}}
+```
+
+Mỗi item có `kind` (`PRACTICE` hoặc `EXAM`), `attempt_id`, `room_id` (hoặc
+`null`), `title`, `topic`, `difficulty`, `score`, `correct_count`, `total`,
+`duration_seconds`, `completed_at`, `state`. Response có `has_more` để GUI
+phân trang an toàn.
+
+### `GET_MY_STATS`
+
+Trả thống kê chỉ của caller:
+
+```json
+{"type":"GET_MY_STATS","request_id":"stats-001","token":"<session-token>","payload":{}}
+```
+
+Response gồm `attempts`, `average_score`, `correct_count`, `total_questions`,
+`accuracy_percent`, `streak_days` và `by_topic`. Mỗi bucket `by_topic` có
+`topic`, `difficulty`, `correct_count`, `total`, `accuracy_percent`. Topic và
+độ khó được lưu snapshot cho bài mới để việc admin sửa ngân hàng câu hỏi sau này
+không làm sai số liệu lịch sử.
+
+### `UPDATE_MY_PROFILE`
+
+Cho phép đổi `display_name`, hoặc đổi password bằng cả `current_password` và
+`new_password` (8–128 ký tự). Không response/log password, password hash hay
+session token.
+
+```json
+{"type":"UPDATE_MY_PROFILE","request_id":"profile-update-001","token":"<session-token>","payload":{"display_name":"Nguyễn A","current_password":"OldPass123","new_password":"NewPass123"}}
+```
+
+Ít nhất một thay đổi là bắt buộc. Sai password hiện tại nhận `UNAUTHORIZED`;
+field sai kiểu hay thiếu cặp password nhận `BAD_REQUEST`.
+
+### CSV question bank trên GUI
+
+`IMPORT_QUESTIONS` vẫn là transaction server-side atomic tối đa 100 câu. GUI
+CSV đọc các cột `content`, `topic`, `difficulty`, `option_a`…`option_d`,
+`correct_option_index`, `explanation`, validate và báo đúng dòng lỗi trước khi
+gửi request JSON này. Xuất CSV lấy toàn bộ trang `LIST_QUESTIONS` theo filter
+đang chọn; dữ liệu vẫn có nguồn từ TCP server chứ không từ mock/local JSON.
+
 ---
 
 ## Request Phase 2 — Reliability & Reconnect (Người 1)
 
-### 12. `GET_MY_ACTIVE_EXAM`
+### `GET_MY_ACTIVE_EXAM`
 
 Cho phép client sau khi bị mất kết nối mạng (rớt TCP socket) kết nối lại bằng `token` còn hạn để khôi phục bài thi đang làm trong phòng `RUNNING`. Yêu cầu `token` hợp lệ (`UNAUTHORIZED` nếu thiếu/sai/hết hạn). **Tuyệt đối không trả về đáp án đúng.**
 
