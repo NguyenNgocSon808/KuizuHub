@@ -163,6 +163,37 @@ static bool is_valid_password(const char *password) {
     return len >= 8U && len <= 128U;
 }
 
+static bool is_valid_display_name(const char *display_name) {
+    size_t length;
+    bool has_visible_character = false;
+
+    if (display_name == NULL) {
+        return false;
+    }
+    length = strlen(display_name);
+    if (length == 0U || length > 96U) {
+        return false;
+    }
+    for (size_t index = 0U; index < length; index++) {
+        if (!isspace((unsigned char)display_name[index])) {
+            has_visible_character = true;
+            break;
+        }
+    }
+    return has_visible_character;
+}
+
+static bool payload_mentions_member(const char *payload_json, const char *member) {
+    char needle[96];
+    int written;
+
+    if (payload_json == NULL || member == NULL) {
+        return false;
+    }
+    written = snprintf(needle, sizeof(needle), "\"%s\"", member);
+    return written > 0 && (size_t)written < sizeof(needle) && strstr(payload_json, needle) != NULL;
+}
+
 static bool is_valid_role(const char *role) {
     if (role == NULL) {
         return false;
@@ -179,6 +210,7 @@ bool require_session(const char *token, kz_auth_user *out_user,
     sqlite3_stmt *stmt = NULL;
     const char *sql =
         "SELECT u.id, u.username, u.role, u.created_at, "
+        "       COALESCE(NULLIF(u.display_name, ''), u.username), "
         "       (s.revoked_at IS NOT NULL) AS is_revoked, "
         "       (s.expires_at <= datetime('now')) AS is_expired "
         "FROM sessions s "
@@ -220,8 +252,9 @@ bool require_session(const char *token, kz_auth_user *out_user,
     const char *username = (const char *)sqlite3_column_text(stmt, 1);
     const char *role = (const char *)sqlite3_column_text(stmt, 2);
     const char *created_at = (const char *)sqlite3_column_text(stmt, 3);
-    int is_revoked = sqlite3_column_int(stmt, 4);
-    int is_expired = sqlite3_column_int(stmt, 5);
+    const char *display_name = (const char *)sqlite3_column_text(stmt, 4);
+    int is_revoked = sqlite3_column_int(stmt, 5);
+    int is_expired = sqlite3_column_int(stmt, 6);
 
     if (is_revoked || is_expired) {
         char entity_id[32];
@@ -241,6 +274,9 @@ bool require_session(const char *token, kz_auth_user *out_user,
         out_user->id = user_id;
         if (username != NULL) {
             strncpy(out_user->username, username, sizeof(out_user->username) - 1U);
+        }
+        if (display_name != NULL) {
+            strncpy(out_user->display_name, display_name, sizeof(out_user->display_name) - 1U);
         }
         if (role != NULL) {
             strncpy(out_user->role, role, sizeof(out_user->role) - 1U);
@@ -541,6 +577,7 @@ void handle_get_my_profile(kz_connection *conn, const char *request_id, const ch
     const char *err_code = NULL;
     const char *err_msg = NULL;
     char escaped_username[128];
+    char escaped_display_name[194];
     char escaped_created[64];
     char data_json[512];
 
@@ -549,11 +586,167 @@ void handle_get_my_profile(kz_connection *conn, const char *request_id, const ch
         return;
     }
     json_escape(user.username, escaped_username, sizeof(escaped_username));
+    json_escape(user.display_name, escaped_display_name, sizeof(escaped_display_name));
     json_escape(user.created_at, escaped_created, sizeof(escaped_created));
     snprintf(data_json, sizeof(data_json),
-             "{\"user\":{\"id\":%d,\"username\":\"%s\",\"role\":\"%s\",\"created_at\":\"%s\"}}",
-             user.id, escaped_username, user.role, escaped_created);
+             "{\"user\":{\"id\":%d,\"username\":\"%s\",\"display_name\":\"%s\",\"role\":\"%s\",\"created_at\":\"%s\"}}",
+             user.id, escaped_username, escaped_display_name, user.role, escaped_created);
     (void)send_ok_data(conn->socket_fd, request_id, data_json);
+}
+
+void handle_update_my_profile(kz_connection *conn, const char *request_id,
+                              const char *token, const char *payload_json) {
+    kz_auth_user user;
+    const char *err_code = NULL;
+    const char *err_msg = NULL;
+    char display_name[97] = {0};
+    char current_password[160] = {0};
+    char new_password[160] = {0};
+    char password_hash[256] = {0};
+    char stored_hash[256] = {0};
+    char escaped_display_name[194];
+    char entity_id[32];
+    char detail_json[96];
+    char data_json[384];
+    bool changes_display_name;
+    bool changes_password;
+    bool has_current_password;
+    bool has_new_password;
+    sqlite3 *db;
+    sqlite3_stmt *statement = NULL;
+
+    if (!require_session(token, &user, &err_code, &err_msg)) {
+        send_error(conn->socket_fd, request_id, err_code, err_msg);
+        return;
+    }
+
+    changes_display_name = find_json_string_member(payload_json, "display_name",
+                                                    display_name, sizeof(display_name));
+    has_current_password = find_json_string_member(payload_json, "current_password",
+                                                    current_password, sizeof(current_password));
+    has_new_password = find_json_string_member(payload_json, "new_password",
+                                                new_password, sizeof(new_password));
+    changes_password = has_current_password || has_new_password;
+    if ((payload_mentions_member(payload_json, "display_name") && !changes_display_name) ||
+        (payload_mentions_member(payload_json, "current_password") && !has_current_password) ||
+        (payload_mentions_member(payload_json, "new_password") && !has_new_password)) {
+        send_error(conn->socket_fd, request_id, "BAD_REQUEST", "Profile fields must be strings");
+        return;
+    }
+    if (!changes_display_name && !changes_password) {
+        send_error(conn->socket_fd, request_id, "BAD_REQUEST", "At least one profile change is required");
+        return;
+    }
+    if (changes_display_name && !is_valid_display_name(display_name)) {
+        send_error(conn->socket_fd, request_id, "BAD_REQUEST",
+                   "display_name must contain 1 to 96 non-blank characters");
+        return;
+    }
+    if (changes_password && (current_password[0] == '\0' || new_password[0] == '\0')) {
+        send_error(conn->socket_fd, request_id, "BAD_REQUEST",
+                   "current_password and new_password are both required");
+        return;
+    }
+    if (changes_password && !is_valid_password(new_password)) {
+        send_error(conn->socket_fd, request_id, "BAD_REQUEST",
+                   "new_password must be 8 to 128 characters");
+        return;
+    }
+    if (changes_password && !kz_hash_password(new_password, password_hash, sizeof(password_hash))) {
+        send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Failed to hash new password");
+        return;
+    }
+
+    db = kz_db_lock();
+    if (db == NULL) {
+        kz_db_unlock();
+        send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Database error");
+        return;
+    }
+    if (changes_password) {
+        if (sqlite3_prepare_v2(db, "SELECT password_hash FROM users WHERE id = ?;", -1,
+                               &statement, NULL) != SQLITE_OK) {
+            kz_db_unlock();
+            send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not read profile");
+            return;
+        }
+        (void)sqlite3_bind_int(statement, 1, user.id);
+        if (sqlite3_step(statement) != SQLITE_ROW || sqlite3_column_text(statement, 0) == NULL) {
+            sqlite3_finalize(statement);
+            kz_db_unlock();
+            send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not read profile");
+            return;
+        }
+        (void)snprintf(stored_hash, sizeof(stored_hash), "%s",
+                       (const char *)sqlite3_column_text(statement, 0));
+        sqlite3_finalize(statement);
+        statement = NULL;
+        if (!kz_verify_password(current_password, stored_hash)) {
+            (void)snprintf(entity_id, sizeof(entity_id), "%d", user.id);
+            kz_log_event_db(db, user.id, "PROFILE_UPDATE_DENIED", "user", entity_id,
+                            "{\"reason\":\"wrong_current_password\"}");
+            kz_db_unlock();
+            send_error(conn->socket_fd, request_id, "UNAUTHORIZED", "Current password is incorrect");
+            return;
+        }
+    }
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) {
+        kz_db_unlock();
+        send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not update profile");
+        return;
+    }
+    if (changes_display_name) {
+        if (sqlite3_prepare_v2(db, "UPDATE users SET display_name = ? WHERE id = ?;", -1,
+                               &statement, NULL) != SQLITE_OK) {
+            goto rollback;
+        }
+        (void)sqlite3_bind_text(statement, 1, display_name, -1, SQLITE_STATIC);
+        (void)sqlite3_bind_int(statement, 2, user.id);
+        if (sqlite3_step(statement) != SQLITE_DONE) {
+            goto rollback;
+        }
+        sqlite3_finalize(statement);
+        statement = NULL;
+    }
+    if (changes_password) {
+        if (sqlite3_prepare_v2(db, "UPDATE users SET password_hash = ? WHERE id = ?;", -1,
+                               &statement, NULL) != SQLITE_OK) {
+            goto rollback;
+        }
+        (void)sqlite3_bind_text(statement, 1, password_hash, -1, SQLITE_STATIC);
+        (void)sqlite3_bind_int(statement, 2, user.id);
+        if (sqlite3_step(statement) != SQLITE_DONE) {
+            goto rollback;
+        }
+        sqlite3_finalize(statement);
+        statement = NULL;
+    }
+    if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+        goto rollback;
+    }
+
+    if (!changes_display_name) {
+        (void)snprintf(display_name, sizeof(display_name), "%s", user.display_name);
+    }
+    json_escape(display_name, escaped_display_name, sizeof(escaped_display_name));
+    (void)snprintf(entity_id, sizeof(entity_id), "%d", user.id);
+    (void)snprintf(detail_json, sizeof(detail_json),
+                   "{\"display_name_changed\":%s,\"password_changed\":%s}",
+                   changes_display_name ? "true" : "false",
+                   changes_password ? "true" : "false");
+    kz_log_event_db(db, user.id, "PROFILE_UPDATED", "user", entity_id, detail_json);
+    kz_db_unlock();
+    (void)snprintf(data_json, sizeof(data_json),
+                   "{\"user\":{\"id\":%d,\"username\":\"%s\",\"display_name\":\"%s\",\"role\":\"%s\"}}",
+                   user.id, user.username, escaped_display_name, user.role);
+    (void)send_ok_data(conn->socket_fd, request_id, data_json);
+    return;
+
+rollback:
+    sqlite3_finalize(statement);
+    (void)sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+    kz_db_unlock();
+    send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not update profile");
 }
 
 void handle_list_rooms(kz_connection *conn, const char *request_id, const char *token) {
@@ -564,9 +757,12 @@ void handle_list_rooms(kz_connection *conn, const char *request_id, const char *
     sqlite3_stmt *stmt = NULL;
     const char *sql =
         "SELECT r.id, r.name, r.owner_id, u.username, r.status, r.duration_seconds, "
-        "       (SELECT COUNT(*) FROM room_participants rp WHERE rp.room_id = r.id) AS participant_count "
+        "       COUNT(rp.user_id) AS participant_count "
         "FROM exam_rooms r "
         "JOIN users u ON u.id = r.owner_id "
+        "LEFT JOIN room_participants rp ON rp.room_id = r.id "
+        "WHERE r.status IN ('WAITING', 'RUNNING', 'ENDED') "
+        "GROUP BY r.id, r.name, r.owner_id, u.username, r.status, r.duration_seconds "
         "ORDER BY r.id DESC;";
     char *buf;
     size_t buf_cap = 32768U;

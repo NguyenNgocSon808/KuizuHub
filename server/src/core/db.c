@@ -251,6 +251,27 @@ bool kz_db_init(const char *db_path, const char *migration_path) {
         return false;
     }
 
+    if (!apply_registered_migration(g_db, "003_practice_sessions", KZ_MIGRATION_003_PATH)) {
+        sqlite3_close(g_db);
+        g_db = NULL;
+        pthread_mutex_unlock(&g_db_mutex);
+        return false;
+    }
+
+    if (!apply_registered_migration(g_db, "004_room_question_options", KZ_MIGRATION_004_PATH)) {
+        sqlite3_close(g_db);
+        g_db = NULL;
+        pthread_mutex_unlock(&g_db_mutex);
+        return false;
+    }
+
+    if (!apply_registered_migration(g_db, "005_profile_analytics", KZ_MIGRATION_005_PATH)) {
+        sqlite3_close(g_db);
+        g_db = NULL;
+        pthread_mutex_unlock(&g_db_mutex);
+        return false;
+    }
+
     pthread_mutex_unlock(&g_db_mutex);
     return true;
 }

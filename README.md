@@ -1,109 +1,102 @@
 # KuizuHub – Online Exam TCP
 
-KuizuHub là ứng dụng thi trắc nghiệm gồm server C99 chạy TCP và client desktop Python/PySide6. Giao thức chung là **NDJSON qua TCP**: mỗi bản tin là một JSON UTF-8, kết thúc bởi đúng một ký tự `\n`.
+KuizuHub là hệ thống thi trực tuyến dùng giao thức TCP/NDJSON: C99 + SQLite ở server và PySide6 ở desktop client. Toàn bộ màn hình đang dùng API server thật; dữ liệu mock chỉ còn là tài sản cũ, không nằm trên luồng chạy chính.
 
-Phase 0 cung cấp server TCP, migration SQLite, 30 câu hỏi seed và kiểm tra `PING`. Phase 1 hiện đã có xác thực/session, protocol NDJSON, activity log, ngân hàng câu hỏi quản trị và GUI PySide6 kết nối TCP thật cho Register, Login, Dashboard và Question Bank. Phòng thi, luyện tập, lịch sử và analytics vẫn thuộc Phase 2–3 nên không được giả lập là dữ liệu thật trong GUI Phase 1.
+## Phạm vi đã hoàn thiện
 
-## Yêu cầu trên Ubuntu 24.04
+- **Chặng 0–1:** khung TCP, đăng ký/đăng nhập, phân quyền và ngân hàng câu hỏi.
+- **Chặng 2:** tạo/join/start phòng, sảnh chờ, đề thi được snapshot, autosave, đồng hồ theo server, nộp bài và xem kết quả sau khi phòng kết thúc.
+- **Chặng 3:** luyện tập, lịch sử, thống kê theo chủ đề/độ khó, streak, leaderboard, hồ sơ cá nhân và nhập/xuất CSV câu hỏi.
+- **Chặng 4 (đóng gói cốt lõi):** migration có thể lặp lại, seed/reset demo, kiểm thử backend và client, kịch bản demo.
+
+## Yêu cầu
+
+- Windows: Python 3.12+, MSYS2/MinGW-w64 có `gcc`, `make`, SQLite3 và OpenSSL.
+- Ubuntu 24.04: `build-essential`, `libsqlite3-dev`, `libssl-dev`, `python3`, `python3-venv`.
+
+Trên Ubuntu, cài một lần bằng:
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential libsqlite3-dev libssl-dev python3 python3-venv
-python3 -m venv client/.venv
-client/.venv/bin/pip install -r client/requirements.txt
 ```
 
-`sqlite3` CLI không bắt buộc: script khởi tạo dùng module `sqlite3` có sẵn của Python.
+## Chạy nhanh
 
-## Chạy Phase 1 trên Windows (PowerShell)
-
-Từ thư mục gốc repository, khởi tạo database và build server:
+### Windows PowerShell
 
 ```powershell
-python scripts/seed_db.py --reset
+.\scripts\reset_demo.ps1   # chỉ chạy khi server đang dừng
 mingw32-make
-```
-
-Chạy server ở terminal thứ nhất (lệnh này giữ terminal mở):
-
-```powershell
 mingw32-make run
 ```
 
-Server mặc định lắng nghe tại `0.0.0.0:5050`. Mở terminal thứ hai để kiểm tra client TCP skeleton:
+Mở terminal khác từ thư mục gốc:
 
 ```powershell
-python client/ping_client.py
-```
-
-Kết quả mong đợi:
-
-```json
-{"type":"OK","request_id":"phase0-ping","data":{"message":"pong"}}
-```
-
-Nếu port `5050` đang được dùng, chạy cùng một port ở cả hai lệnh:
-
-```powershell
-mingw32-make run PORT=5051
-python client/ping_client.py --port 5051
-```
-
-Mở GUI PySide6 kết nối TCP thật:
-
-```powershell
-python -m pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 python main.py
 ```
 
-GUI mặc định kết nối `127.0.0.1:5050`. Nếu đổi port/host, đặt cùng biến môi trường trước khi chạy GUI:
-
-```powershell
-$env:KUIZUHUB_HOST = "127.0.0.1"
-$env:KUIZUHUB_PORT = "5051"
-python main.py
-```
-
-Đăng ký một tài khoản có vai trò `ADMIN` trong màn đăng ký để nghiệm thu ngân hàng câu hỏi. Quy tắc role hiện theo contract `REGISTER` trong `docs/protocol.md`.
-
-## Chạy Phase 1 trên Ubuntu 24.04
-
-Từ thư mục gốc repository:
+### Ubuntu/macOS
 
 ```bash
-bash scripts/init_db.sh
+bash scripts/reset_demo.sh  # chỉ chạy khi server đang dừng
 make
 make run
 ```
 
-Server mặc định lắng nghe tại `0.0.0.0:5050`; có thể đổi port bằng `make run PORT=5051`.
-
-Ở terminal khác, kiểm tra client TCP skeleton:
+Mở terminal khác:
 
 ```bash
-python3 client/ping_client.py
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 main.py
 ```
 
-Kết quả mong đợi là response `OK` với `data.message` bằng `pong`. GUI chạy bằng `python3 main.py` và kết nối đến server thật qua TCP.
+Server mặc định bind `0.0.0.0:5050`; client mặc định kết nối `127.0.0.1:5050`. Có thể đổi địa chỉ client qua `KUIZUHUB_HOST` và `KUIZUHUB_PORT` trước khi chạy. Tạo tài khoản `HOST`, `STUDENT` và `ADMIN` trực tiếp ở màn đăng ký để demo các vai trò.
 
 ## Kiểm thử
 
 ```bash
-make test
-python3 -m pytest client/tests -q
+mingw32-make test       # Windows
+python -m pytest client/tests -q
 ```
 
-`make test` build server và chạy kiểm thử TCP cho framing, auth/session và ngân hàng câu hỏi: migration nâng cấp DB cũ, phân quyền ADMIN, create/list/update/disable và import atomic. Test client kiểm tra persistent TCP NDJSON với response bị chia nhỏ.
+Trên Unix thay `mingw32-make` bằng `make`. Kế hoạch test và luồng trình diễn nằm tại [docs/test-plan.md](docs/test-plan.md) và [docs/demo-script.md](docs/demo-script.md).
 
-## Cấu trúc quan trọng
+## Reset dữ liệu demo
 
-- `server/src/main.c`: TCP server NDJSON, port mặc định 5050.
-- `server/src/question/question.c`: CRUD/import ngân hàng câu hỏi chỉ dành cho ADMIN.
-- `server/migrations/001_initial.sql`, `server/migrations/002_question_explanation.sql`: schema và migration Phase 1.
-- `server/seed/questions.json`: 30 câu hỏi seed hợp lệ.
-- `scripts/init_db.sh`: tái tạo `server/data/exam.db` từ migration và seed.
-- `client/app/services/tcp_api_service.py`: worker `QThread` chạy TCP ngoài UI thread.
-- `client/app/ui/phase1_main_window.py`: các màn Phase 1 dùng API thật.
-- `docs/protocol.md`, `docs/database.md`: hợp đồng tích hợp.
+Chỉ dùng khi server đã dừng. Lệnh này xóa cơ sở dữ liệu runtime và tạo lại schema/seed.
 
-Không commit database cục bộ, `.venv`, binary, object file hoặc log server.
+```powershell
+.\scripts\reset_demo.ps1
+```
+
+```bash
+bash scripts/reset_demo.sh
+```
+
+## Cấu trúc chính
+
+```text
+server/                 server C11, SQLite, migration và test tích hợp
+client/                 desktop client PySide6
+docs/protocol.md        hợp đồng TCP/NDJSON
+docs/database.md        schema, snapshot và migration
+docs/test-plan.md       checklist kiểm thử
+docs/demo-script.md     kịch bản demo
+scripts/                seed và reset dữ liệu demo
+```
+
+Xem [client/README.md](client/README.md) để biết phạm vi giao diện, và [docs/protocol.md](docs/protocol.md) để tích hợp một client TCP khác.
+
+admin: admin
+       12345678
+student: sinhvien
+        12345678
+chủ phòng: chuphong 
+          12345678

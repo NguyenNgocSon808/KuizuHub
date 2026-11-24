@@ -1,4 +1,4 @@
-"""Desktop-only entry point for the Online Exam mock client."""
+"""Desktop entry point for the server-backed KuizuHub client."""
 
 from client.app.app import run
 

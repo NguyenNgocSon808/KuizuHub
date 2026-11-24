@@ -1,8 +1,9 @@
-"""Live Phase 1 desktop UI: auth, dashboard shell, and question administration."""
+"""Shared server-backed auth, dashboard, and question-bank UI surfaces."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -103,7 +104,7 @@ class LiveAuthPage(QWidget):
         title = QLabel("KuizuHub")
         title.setStyleSheet("color:white;font-size:34px;font-weight:700;")
         layout.addWidget(title)
-        copy = QLabel("Phase 1 · TCP NDJSON thực\nĐăng nhập và quản lý ngân hàng câu hỏi.")
+        copy = QLabel("TCP NDJSON thực\nĐăng nhập để làm bài, luyện tập và quản lý câu hỏi.")
         copy.setStyleSheet("color:#BFD4EA;font-size:16px;")
         copy.setWordWrap(True)
         layout.addWidget(copy)
@@ -276,7 +277,7 @@ class LiveDashboardPage(QWidget):
         title = QLabel(f"Xin chào, {user.username}!")
         title.setObjectName("pageTitle")
         hero_layout.addWidget(title)
-        copy = QLabel("Bạn đang dùng dữ liệu thật từ TCP server. Các tính năng phòng thi, luyện tập và lịch sử sẽ được nối ở phase sau.")
+        copy = QLabel("Bạn đang dùng dữ liệu thật từ TCP server. Phòng thi, luyện tập, lịch sử và thống kê đều được đồng bộ từ server.")
         copy.setObjectName("subtle")
         copy.setWordWrap(True)
         hero_layout.addWidget(copy)
@@ -297,7 +298,7 @@ class LiveDashboardPage(QWidget):
         action_card.setObjectName("sectionCard")
         actions = QVBoxLayout(action_card)
         actions.setContentsMargins(18, 16, 18, 16)
-        actions.addWidget(QLabel("Thao tác Phase 1", objectName="sectionTitle"))
+        actions.addWidget(QLabel("Thao tác tài khoản", objectName="sectionTitle"))
         if user.role == "ADMIN":
             questions = PrimaryButton("Mở ngân hàng câu hỏi")
             questions.clicked.connect(self.open_questions)
@@ -436,6 +437,9 @@ class QuestionBankPage(QWidget):
         self.offset = 0
         self._pending: dict[str, str] = {}
         self._has_more = False
+        self._export_path: Path | None = None
+        self._export_rows: list[dict[str, Any]] = []
+        self._export_offset = 0
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(12)
@@ -452,8 +456,14 @@ class QuestionBankPage(QWidget):
         add.clicked.connect(self._add)
         header.addWidget(add)
         import_button = SecondaryButton("Nhập JSON")
-        import_button.clicked.connect(self._import_file)
+        import_button.clicked.connect(self._import_json_file)
         header.addWidget(import_button)
+        import_csv_button = SecondaryButton("Nhập CSV")
+        import_csv_button.clicked.connect(self._import_csv_file)
+        header.addWidget(import_csv_button)
+        export_csv_button = SecondaryButton("Xuất CSV")
+        export_csv_button.clicked.connect(self._export_csv)
+        header.addWidget(export_csv_button)
         root.addLayout(header)
 
         filters = QFrame()
@@ -560,7 +570,7 @@ class QuestionBankPage(QWidget):
         self._pending[request_id] = action
         self.notice.setText("Đang cập nhật trạng thái…")
 
-    def _import_file(self) -> None:
+    def _import_json_file(self) -> None:
         file_name, _ = QFileDialog.getOpenFileName(self, "Chọn file JSON câu hỏi", "", "JSON files (*.json)")
         if not file_name:
             return
@@ -575,6 +585,128 @@ class QuestionBankPage(QWidget):
         request_id = self.service.import_questions(raw)
         self._pending[request_id] = "import"
         self.notice.setText("Đang import câu hỏi…")
+
+    @staticmethod
+    def _csv_question_rows(file_name: str) -> list[dict[str, Any]]:
+        required = {
+            "content", "topic", "difficulty", "option_a", "option_b", "option_c", "option_d",
+            "correct_option_index",
+        }
+        with Path(file_name).open("r", encoding="utf-8-sig", newline="") as source:
+            reader = csv.DictReader(source)
+            if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+                raise ValueError("CSV cần các cột: " + ", ".join(sorted(required)))
+            questions: list[dict[str, Any]] = []
+            for line_number, row in enumerate(reader, start=2):
+                content = (row.get("content") or "").strip()
+                topic = (row.get("topic") or "").strip()
+                difficulty = (row.get("difficulty") or "").strip()
+                options = [(row.get(f"option_{letter}") or "").strip() for letter in "abcd"]
+                correct_raw = (row.get("correct_option_index") or "").strip().upper()
+                if correct_raw in {"A", "B", "C", "D"}:
+                    correct_index = "ABCD".index(correct_raw)
+                else:
+                    try:
+                        correct_index = int(correct_raw)
+                    except ValueError as error:
+                        raise ValueError(f"Dòng {line_number}: correct_option_index phải là 0-3 hoặc A-D.") from error
+                if not content or not topic or difficulty not in {"easy", "medium", "hard"} or not all(options):
+                    raise ValueError(
+                        f"Dòng {line_number}: content, topic, difficulty (easy/medium/hard) và 4 đáp án là bắt buộc."
+                    )
+                if correct_index not in range(4):
+                    raise ValueError(f"Dòng {line_number}: correct_option_index phải từ 0 đến 3.")
+                questions.append({
+                    "content": content,
+                    "topic": topic,
+                    "difficulty": difficulty,
+                    "options": options,
+                    "correct_option_index": correct_index,
+                    "explanation": (row.get("explanation") or "").strip(),
+                })
+        if not questions:
+            raise ValueError("CSV không có câu hỏi nào.")
+        if len(questions) > 100:
+            raise ValueError("Mỗi lần import tối đa 100 dòng để đảm bảo transaction atomic.")
+        return questions
+
+    def _import_csv_file(self) -> None:
+        file_name, _ = QFileDialog.getOpenFileName(self, "Chọn file CSV câu hỏi", "", "CSV files (*.csv)")
+        if not file_name:
+            return
+        try:
+            questions = self._csv_question_rows(file_name)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "CSV không hợp lệ", str(error))
+            return
+        request_id = self.service.import_questions(questions)
+        self._pending[request_id] = "import_csv"
+        self.notice.setText(f"Đang import {len(questions)} câu hỏi từ CSV…")
+
+    def _export_csv(self) -> None:
+        file_name, _ = QFileDialog.getSaveFileName(
+            self, "Xuất ngân hàng câu hỏi", "questions.csv", "CSV files (*.csv)"
+        )
+        if not file_name:
+            return
+        output = Path(file_name)
+        if output.suffix.lower() != ".csv":
+            output = output.with_suffix(".csv")
+        self._export_path = output
+        self._export_rows = []
+        self._export_offset = 0
+        self._request_export_page()
+
+    def _request_export_page(self) -> None:
+        request_id = self.service.list_questions(
+            query=self.query.text().strip(),
+            topic=self.topic.text().strip(),
+            difficulty=str(self.difficulty.currentData()),
+            include_inactive=self.include_inactive.isChecked(),
+            limit=20,
+            offset=self._export_offset,
+        )
+        self._pending[request_id] = "export"
+        self.notice.setText("Đang lấy dữ liệu để xuất CSV…")
+
+    def _write_export_csv(self) -> None:
+        if self._export_path is None:
+            return
+        fields = [
+            "content", "topic", "difficulty", "option_a", "option_b", "option_c", "option_d",
+            "correct_option_index", "explanation", "is_active",
+        ]
+        try:
+            with self._export_path.open("w", encoding="utf-8-sig", newline="") as destination:
+                writer = csv.DictWriter(destination, fieldnames=fields)
+                writer.writeheader()
+                for question in self._export_rows:
+                    raw_options = question.get("options")
+                    options = raw_options if isinstance(raw_options, list) else []
+                    option_contents = [
+                        str(option.get("content", "")) if isinstance(option, dict) else str(option)
+                        for option in options
+                    ]
+                    option_contents.extend([""] * (4 - len(option_contents)))
+                    writer.writerow({
+                        "content": question.get("content", ""),
+                        "topic": question.get("topic", ""),
+                        "difficulty": question.get("difficulty", ""),
+                        "option_a": option_contents[0],
+                        "option_b": option_contents[1],
+                        "option_c": option_contents[2],
+                        "option_d": option_contents[3],
+                        "correct_option_index": question.get("correct_option_index", 0),
+                        "explanation": question.get("explanation", ""),
+                        "is_active": 1 if question.get("is_active") else 0,
+                    })
+        except OSError as error:
+            QMessageBox.warning(self, "Không thể xuất CSV", str(error))
+            return
+        self.notice.setText(f"Đã xuất {len(self._export_rows)} câu hỏi vào {self._export_path.name}.")
+        show_toast(self, "Đã xuất CSV thành công.")
+        self._export_path = None
+        self._export_rows = []
 
     def _render(self) -> None:
         self.table.setRowCount(len(self.questions))
@@ -622,12 +754,28 @@ class QuestionBankPage(QWidget):
             except ValueError as error:
                 self.notice.setText(str(error))
             return
+        if action == "export":
+            try:
+                data = _response_data(response)
+                raw_questions = data.get("questions")
+                if not isinstance(raw_questions, list) or not all(isinstance(item, dict) for item in raw_questions):
+                    raise ValueError("Server returned invalid question data")
+                self._export_rows.extend(raw_questions)
+                if bool(data.get("has_more")):
+                    self._export_offset += len(raw_questions)
+                    self._request_export_page()
+                else:
+                    self._write_export_csv()
+            except ValueError as error:
+                self.notice.setText(str(error))
+            return
         messages = {
             "create": "Đã tạo câu hỏi.",
             "update": "Đã cập nhật câu hỏi.",
             "disable": "Đã disable câu hỏi.",
             "enable": "Đã enable câu hỏi.",
             "import": "Đã import câu hỏi.",
+            "import_csv": "Đã import câu hỏi từ CSV.",
         }
         message = messages.get(action, "Đã hoàn tất.")
         self.notice.setText(message)
@@ -641,7 +789,7 @@ class QuestionBankPage(QWidget):
 
 
 class PhaseOneMainWindow(QMainWindow):
-    """Main window restricted to server-backed Phase 1 surfaces."""
+    """Legacy compact window for the shared server-backed surfaces."""
 
     def __init__(self, service: PhaseOneApiService) -> None:
         super().__init__()
@@ -716,7 +864,7 @@ class PhaseOneMainWindow(QMainWindow):
             self.questions_nav.clicked.connect(self.show_questions)
             layout.addWidget(self.questions_nav)
         layout.addStretch()
-        note = QLabel("Phase 1\nKết nối TCP thật")
+        note = QLabel("Kết nối TCP thật")
         note.setObjectName("caption")
         note.setWordWrap(True)
         layout.addWidget(note)

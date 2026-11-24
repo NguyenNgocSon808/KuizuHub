@@ -386,6 +386,53 @@ bool find_json_array_member(const char *json, const char *member,
     return true;
 }
 
+bool find_json_object_array_member(const char *json, const char *member,
+                                   char *values, size_t value_width,
+                                   size_t value_capacity, size_t *out_count) {
+    const char *cursor = find_json_member_value(json, member);
+    size_t count = 0U;
+
+    if (cursor == NULL || *cursor != '[' || values == NULL || value_width == 0U ||
+        value_capacity == 0U || out_count == NULL) {
+        return false;
+    }
+    cursor = skip_whitespace(cursor + 1);
+    if (*cursor == ']') {
+        *out_count = 0U;
+        return true;
+    }
+
+    while (true) {
+        const char *object_start;
+        size_t object_length;
+
+        if (count >= value_capacity || *cursor != '{') {
+            return false;
+        }
+        object_start = cursor;
+        if (!skip_json_object(&cursor, 1U)) {
+            return false;
+        }
+        object_length = (size_t)(cursor - object_start);
+        if (object_length + 1U > value_width) {
+            return false;
+        }
+        memcpy(values + (count * value_width), object_start, object_length);
+        values[count * value_width + object_length] = '\0';
+        count++;
+
+        cursor = skip_whitespace(cursor);
+        if (*cursor == ']') {
+            *out_count = count;
+            return true;
+        }
+        if (*cursor++ != ',') {
+            return false;
+        }
+        cursor = skip_whitespace(cursor);
+    }
+}
+
 bool find_json_string_array_member(const char *json, const char *member,
                                    char *values, size_t value_width,
                                    size_t value_capacity, size_t *out_count) {
