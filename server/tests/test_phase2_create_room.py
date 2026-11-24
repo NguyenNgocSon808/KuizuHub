@@ -669,6 +669,51 @@ class CreateRoomTests(unittest.TestCase):
         self.assertEqual(status, "WAITING")
         self.assertEqual(snapshots, 0)
 
+    def test_13_large_exam_loads_and_early_end_grades_saved_answers(self) -> None:
+        topic = "Long questions"
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            for index in range(26):
+                question_id = db.execute(
+                    "INSERT INTO questions(content, topic, difficulty) VALUES (?, ?, 'easy')",
+                    (f"Question {index} " + "q" * 1100, topic),
+                ).lastrowid
+                for position, label in enumerate("ABCD", start=1):
+                    option_id = db.execute(
+                        "INSERT INTO question_options(question_id, label, content, position) VALUES (?, ?, ?, ?)",
+                        (question_id, label, label + "o" * 379, position),
+                    ).lastrowid
+                    if position == 1:
+                        db.execute("UPDATE questions SET correct_option_id = ? WHERE id = ?", (option_id, question_id))
+            db.commit()
+
+        host, _ = self.register_and_login("HOST")
+        student, _ = self.register_and_login("STUDENT")
+        created = self.send_request("CREATE_ROOM", {
+            "name": "Large exam", "duration_seconds": 600,
+            "rules": [{"topic": topic, "difficulty": "easy", "quantity": 26}],
+        }, token=host)
+        room = {"room_id": created["data"]["room_id"]}
+        self.assertEqual(self.send_request("JOIN_ROOM", room, token=student)["type"], "OK")
+        self.assertEqual(self.send_request("START_ROOM", room, token=host)["type"], "OK")
+
+        exam = self.send_request("GET_EXAM", room, token=student)["data"]
+        self.assertEqual(len(exam["questions"]), 26)
+        self.assertGreater(exam["remaining_seconds"], 0)
+        question = exam["questions"][0]
+        self.assertEqual(self.send_request("SAVE_ANSWER", {
+            **room, "question_id": question["id"], "option_id": question["options"][0]["id"],
+        }, token=student)["type"], "OK")
+        recovered = self.send_request("GET_MY_ACTIVE_EXAM", {}, token=student)["data"]["active_exam"]
+        self.assertEqual(len(recovered["questions"]), 26)
+        self.assertEqual(len(recovered["saved_answers"]), 1)
+
+        self.assertEqual(self.send_request("END_ROOM", room, token=host)["type"], "OK")
+        submitted = self.send_request("SUBMIT_EXAM", room, token=student)["data"]
+        self.assertEqual(submitted["state"], "AUTO_SUBMITTED")
+        self.assertEqual(submitted["correct_count"], 1)
+        results = self.send_request("GET_ROOM_RESULTS", room, token=student)["data"]
+        self.assertEqual(len(results["review"]), 26)
+
 
 if __name__ == "__main__":
     unittest.main()

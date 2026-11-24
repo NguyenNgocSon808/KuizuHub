@@ -8,8 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define KZ_RESPONSE_MAX_BYTES (64U * 1024U)
-
 int send_all(kz_socket_t socket_fd, const char *buffer, size_t length) {
     size_t sent = 0;
 
@@ -501,25 +499,30 @@ void json_escape(const char *input, char *output, size_t output_size) {
 
 int send_ok_data(kz_socket_t socket_fd, const char *request_id, const char *data_json) {
     char escaped_id[KZ_REQUEST_ID_BYTES * 2U + 1U];
+    char header[sizeof(escaped_id) + 64U];
+    const char *data = (data_json && data_json[0] != '\0') ? data_json : "{}";
+    size_t data_length = strlen(data);
     char *response;
-    int response_length;
-    int rc;
-
-    response = (char *)malloc(KZ_RESPONSE_MAX_BYTES);
-    if (response == NULL) {
-        return -1;
-    }
     json_escape(request_id ? request_id : "", escaped_id, sizeof(escaped_id));
-    response_length = snprintf(response, KZ_RESPONSE_MAX_BYTES,
-        "{\"type\":\"OK\",\"request_id\":\"%s\",\"data\":%s}\n",
-        escaped_id, (data_json && data_json[0] != '\0') ? data_json : "{}");
-    if (response_length <= 0 || (size_t)response_length >= KZ_RESPONSE_MAX_BYTES) {
-        free(response);
+    int header_length = snprintf(header, sizeof(header),
+        "{\"type\":\"OK\",\"request_id\":\"%s\",\"data\":", escaped_id);
+    if (header_length <= 0 || (size_t)header_length >= sizeof(header) ||
+        data_length + (size_t)header_length + 2U > KZ_MAX_NDJSON_RESPONSE_BYTES) {
+        send_error(socket_fd, request_id, "INTERNAL_ERROR", "Response exceeds the NDJSON limit");
         return -1;
     }
-    rc = send_all(socket_fd, response, (size_t)response_length);
+    size_t response_length = (size_t)header_length + data_length + 2U;
+    response = (char *)malloc(response_length);
+    if (response == NULL) {
+        send_error(socket_fd, request_id, "INTERNAL_ERROR", "Out of memory");
+        return -1;
+    }
+    memcpy(response, header, (size_t)header_length);
+    memcpy(response + header_length, data, data_length);
+    memcpy(response + response_length - 2U, "}\n", 2U);
+    int result = send_all(socket_fd, response, response_length);
     free(response);
-    return rc;
+    return result;
 }
 
 void send_error(kz_socket_t socket_fd, const char *request_id,

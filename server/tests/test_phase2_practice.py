@@ -147,6 +147,30 @@ class PracticeFlowTests(unittest.TestCase):
         self.assertEqual(rejected["type"], "ERROR")
         self.assertEqual(rejected["error"]["code"], "CONFLICT")  # type: ignore[index]
 
+    def test_04_expired_practice_is_graded_without_a_client_submission(self) -> None:
+        attempt = self.start(count=1)["data"]
+        attempt_id = attempt["attempt_id"]
+        saved = self.send("SAVE_PRACTICE_ANSWER", {
+            "attempt_id": attempt_id, "question_id": attempt["questions"][0]["id"],
+            "selected_option_position": 1,
+        }, token=self.token)
+        self.assertEqual(saved["type"], "OK")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            db.execute("UPDATE practice_sessions SET ended_at = datetime('now', '-1 second') WHERE id = ?", (attempt_id,))
+            db.commit()
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                row = db.execute("SELECT state, score FROM practice_sessions WHERE id = ?", (attempt_id,)).fetchone()
+                if row == ("AUTO_SUBMITTED", 10.0):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("Server did not grade the expired practice")
+            history_before = db.execute("SELECT COUNT(*) FROM practice_attempts").fetchone()[0]
+            repeated = self.send("SUBMIT_PRACTICE", {"attempt_id": attempt_id}, token=self.token)["data"]
+            self.assertEqual((repeated["state"], repeated["score"]), row)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM practice_attempts").fetchone()[0], history_before)
+
 
 if __name__ == "__main__":
     unittest.main()

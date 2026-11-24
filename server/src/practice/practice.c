@@ -133,14 +133,17 @@ static char *build_practice_json(sqlite3 *db, int attempt_id) {
     sqlite3_stmt *questions = NULL;
     sqlite3_stmt *options = NULL;
     sqlite3_stmt *answers = NULL;
-    char *result = (char *)malloc(KZ_MAX_NDJSON_LINE_BYTES);
+    const size_t capacity = KZ_MAX_NDJSON_RESPONSE_BYTES - 512U;
+    char *result = (char *)malloc(capacity);
     size_t used = 0U;
     bool first_question = true;
     bool failed = result == NULL;
+    int remaining_seconds = 0;
     char ended_at[32] = {0};
     char escaped_ended_at[64];
     if (!failed && sqlite3_prepare_v2(db,
-        "SELECT ended_at FROM practice_sessions WHERE id = ?;", -1, &session, NULL) != SQLITE_OK) failed = true;
+        "SELECT ended_at, MAX(0, CAST(strftime('%s', ended_at) AS INTEGER) "
+        "- CAST(strftime('%s', 'now') AS INTEGER)) FROM practice_sessions WHERE id = ?;", -1, &session, NULL) != SQLITE_OK) failed = true;
     if (!failed) {
         (void)sqlite3_bind_int(session, 1, attempt_id);
         if (sqlite3_step(session) != SQLITE_ROW || sqlite3_column_text(session, 0) == NULL) {
@@ -148,14 +151,15 @@ static char *build_practice_json(sqlite3 *db, int attempt_id) {
         } else {
             (void)snprintf(ended_at, sizeof(ended_at), "%s",
                            (const char *)sqlite3_column_text(session, 0));
+            remaining_seconds = sqlite3_column_int(session, 1);
         }
     }
     sqlite3_finalize(session);
     session = NULL;
     json_escape(ended_at, escaped_ended_at, sizeof(escaped_ended_at));
-    if (!failed && !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
-        "{\"attempt_id\":%d,\"ended_at\":\"%s\",\"questions\":[",
-        attempt_id, escaped_ended_at)) failed = true;
+    if (!failed && !append_format(result, capacity, &used,
+        "{\"attempt_id\":%d,\"ended_at\":\"%s\",\"remaining_seconds\":%d,\"questions\":[",
+        attempt_id, escaped_ended_at, remaining_seconds)) failed = true;
     if (!failed && sqlite3_prepare_v2(db, "SELECT question_id, position, content_snapshot FROM "
         "practice_session_questions WHERE session_id = ? ORDER BY position;", -1, &questions, NULL) != SQLITE_OK) failed = true;
     if (!failed && sqlite3_prepare_v2(db, "SELECT position, label, content_snapshot FROM "
@@ -172,7 +176,7 @@ static char *build_practice_json(sqlite3 *db, int attempt_id) {
             int selected_option_position = 0;
             char escaped[2401]; bool first_option = true;
             json_escape(content ? content : "", escaped, sizeof(escaped));
-            if (!append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
+            if (!append_format(result, capacity, &used,
                 "%s{\"id\":%d,\"position\":%d,\"content\":\"%s\",\"options\":[",
                 first_question ? "" : ",", question_id, sqlite3_column_int(questions, 1), escaped)) { failed = true; break; }
             (void)sqlite3_bind_int(options, 1, attempt_id); (void)sqlite3_bind_int(options, 2, question_id);
@@ -180,7 +184,7 @@ static char *build_practice_json(sqlite3 *db, int attempt_id) {
                 char label[32], option[801];
                 json_escape((const char *)sqlite3_column_text(options, 1), label, sizeof(label));
                 json_escape((const char *)sqlite3_column_text(options, 2), option, sizeof(option));
-                if (!append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
+                if (!append_format(result, capacity, &used,
                     "%s{\"position\":%d,\"label\":\"%s\",\"content\":\"%s\"}",
                     first_option ? "" : ",", sqlite3_column_int(options, 0), label, option)) { failed = true; break; }
                 first_option = false;
@@ -193,16 +197,16 @@ static char *build_practice_json(sqlite3 *db, int attempt_id) {
             }
             (void)sqlite3_reset(answers); (void)sqlite3_clear_bindings(answers);
             if (!failed && selected_option_position > 0 &&
-                !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
+                !append_format(result, capacity, &used,
                                "],\"selected_option_position\":%d}", selected_option_position)) failed = true;
             if (!failed && selected_option_position == 0 &&
-                !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used,
+                !append_format(result, capacity, &used,
                                "],\"selected_option_position\":null}")) failed = true;
             first_question = false;
         }
     }
     sqlite3_finalize(session); sqlite3_finalize(questions); sqlite3_finalize(options); sqlite3_finalize(answers);
-    if (failed || !append_format(result, KZ_MAX_NDJSON_LINE_BYTES, &used, "]}")) { free(result); return NULL; }
+    if (failed || !append_format(result, capacity, &used, "]}")) { free(result); return NULL; }
     return result;
 }
 
@@ -211,7 +215,7 @@ void handle_start_practice(kz_connection *conn, const char *request_id,
     kz_auth_user user; const char *code = NULL; const char *message = NULL;
     char topic[KZ_PRACTICE_TOPIC_BYTES], difficulty[KZ_PRACTICE_DIFFICULTY_BYTES];
     int question_count = 0, duration = 0, available = 0, attempt_id;
-    sqlite3 *db; sqlite3_stmt *statement = NULL; char *data;
+    sqlite3 *db; sqlite3_stmt *statement = NULL; char *data = NULL;
     if (!require_session(token, &user, &code, &message)) { send_error(conn->socket_fd, request_id, code, message); return; }
     if (!find_json_string_member(payload_json, "topic", topic, sizeof(topic)) || topic[0] == '\0' ||
         !find_json_string_member(payload_json, "difficulty", difficulty, sizeof(difficulty)) ||
@@ -232,12 +236,13 @@ void handle_start_practice(kz_connection *conn, const char *request_id,
     (void)sqlite3_bind_int(statement, 1, user.id); (void)sqlite3_bind_text(statement, 2, topic, -1, SQLITE_STATIC); (void)sqlite3_bind_text(statement, 3, difficulty, -1, SQLITE_STATIC); (void)sqlite3_bind_int(statement, 4, question_count); (void)sqlite3_bind_int(statement, 5, duration); (void)sqlite3_bind_int(statement, 6, duration);
     if (sqlite3_step(statement) != SQLITE_DONE) goto internal_error;
     sqlite3_finalize(statement); statement = NULL; attempt_id = (int)sqlite3_last_insert_rowid(db);
-    if (!snapshot_questions(db, attempt_id, topic, difficulty, question_count) || !execute_sql(db, "COMMIT;")) goto internal_error;
+    if (!snapshot_questions(db, attempt_id, topic, difficulty, question_count)) goto internal_error;
     data = build_practice_json(db, attempt_id);
-    if (data == NULL) { kz_db_unlock(); send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not build practice response"); return; }
+    if (data == NULL || !execute_sql(db, "COMMIT;")) goto internal_error;
     kz_log_event_db(db, user.id, "PRACTICE_STARTED", "practice_session", "started", "{}"); kz_db_unlock();
     (void)send_ok_data(conn->socket_fd, request_id, data); free(data); return;
 internal_error:
+    free(data);
     sqlite3_finalize(statement); (void)execute_sql(db, "ROLLBACK;"); kz_db_unlock();
     send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not start practice");
 }
@@ -259,32 +264,126 @@ error:
     sqlite3_finalize(statement); kz_db_unlock(); send_error(conn->socket_fd, request_id, "BAD_REQUEST", "Question or option is not in this practice attempt");
 }
 
+
+/* Caller holds the DB lock and has selected an active attempt. */
+static bool finish_practice(sqlite3 *db, int attempt_id, int user_id) {
+    sqlite3_stmt *statement = NULL;
+    char entity_id[32];
+
+    if (!execute_sql(db, "BEGIN IMMEDIATE;")) return false;
+    if (sqlite3_prepare_v2(db,
+        "UPDATE practice_sessions SET "
+        "state = CASE WHEN ended_at <= datetime('now') THEN 'AUTO_SUBMITTED' ELSE 'SUBMITTED' END, "
+        "submitted_at = datetime('now'), correct_count = ("
+        "SELECT COUNT(*) FROM practice_session_questions q JOIN practice_answers a "
+        "ON a.session_id = q.session_id AND a.question_id = q.question_id "
+        "WHERE q.session_id = practice_sessions.id "
+        "AND a.selected_option_position = q.correct_option_position) "
+        "WHERE id = ? AND state = 'IN_PROGRESS';", -1, &statement, NULL) != SQLITE_OK) goto rollback;
+    (void)sqlite3_bind_int(statement, 1, attempt_id);
+    if (sqlite3_step(statement) != SQLITE_DONE || sqlite3_changes(db) != 1) goto rollback;
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (sqlite3_prepare_v2(db,
+        "UPDATE practice_sessions SET score = 10.0 * correct_count / question_count WHERE id = ?;",
+        -1, &statement, NULL) != SQLITE_OK) goto rollback;
+    (void)sqlite3_bind_int(statement, 1, attempt_id);
+    if (sqlite3_step(statement) != SQLITE_DONE) goto rollback;
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (sqlite3_prepare_v2(db,
+        "INSERT INTO practice_attempts(user_id, score, correct_count, total, duration_seconds, configuration_json) "
+        "SELECT user_id, score, correct_count, question_count, duration_seconds, "
+        "'{\"source\":\"practice_session\"}' FROM practice_sessions WHERE id = ?;",
+        -1, &statement, NULL) != SQLITE_OK) goto rollback;
+    (void)sqlite3_bind_int(statement, 1, attempt_id);
+    if (sqlite3_step(statement) != SQLITE_DONE) goto rollback;
+    sqlite3_finalize(statement);
+    statement = NULL;
+
+    if (!execute_sql(db, "COMMIT;")) goto rollback;
+    (void)snprintf(entity_id, sizeof(entity_id), "%d", attempt_id);
+    kz_log_event_db(db, user_id, "PRACTICE_SUBMITTED", "practice_session", entity_id, "{}");
+    return true;
+
+rollback:
+    sqlite3_finalize(statement);
+    (void)execute_sql(db, "ROLLBACK;");
+    return false;
+}
+
 void handle_submit_practice(kz_connection *conn, const char *request_id,
                             const char *token, const char *payload_json) {
-    kz_auth_user user; const char *code = NULL; const char *message = NULL; char state[20]; bool expired = false;
-    int attempt_id = 0, correct = 0, total = 0; double score = 0.0; sqlite3 *db; sqlite3_stmt *statement = NULL; char data[192];
-    if (!require_session(token, &user, &code, &message)) { send_error(conn->socket_fd, request_id, code, message); return; }
-    if (!find_json_int_member(payload_json, "attempt_id", &attempt_id) || attempt_id <= 0) { send_error(conn->socket_fd, request_id, "BAD_REQUEST", "attempt_id must be positive"); return; }
-    db = kz_db_lock(); if (db == NULL) { kz_db_unlock(); send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Database error"); return; }
-    if (!load_practice_owner(db, attempt_id, user.id, state, sizeof(state), &expired)) { kz_db_unlock(); send_error(conn->socket_fd, request_id, "NOT_FOUND", "Practice attempt not found"); return; }
-    if (strcmp(state, "IN_PROGRESS") == 0) {
-        if (!execute_sql(db, "BEGIN IMMEDIATE;")) goto internal;
-        if (sqlite3_prepare_v2(db, "SELECT COUNT(*), COALESCE(SUM(CASE WHEN a.selected_option_position = q.correct_option_position THEN 1 ELSE 0 END), 0) FROM practice_session_questions q LEFT JOIN practice_answers a ON a.session_id = q.session_id AND a.question_id = q.question_id WHERE q.session_id = ?;", -1, &statement, NULL) != SQLITE_OK) goto rollback;
-        (void)sqlite3_bind_int(statement, 1, attempt_id); if (sqlite3_step(statement) != SQLITE_ROW) goto rollback;
-        total = sqlite3_column_int(statement, 0); correct = sqlite3_column_int(statement, 1); sqlite3_finalize(statement); statement = NULL; score = total ? (double)correct * 10.0 / (double)total : 0.0;
-        if (sqlite3_prepare_v2(db, "UPDATE practice_sessions SET state = ?, submitted_at = datetime('now'), score = ?, correct_count = ? WHERE id = ?;", -1, &statement, NULL) != SQLITE_OK) goto rollback;
-        (void)sqlite3_bind_text(statement, 1, expired ? "AUTO_SUBMITTED" : "SUBMITTED", -1, SQLITE_STATIC); (void)sqlite3_bind_double(statement, 2, score); (void)sqlite3_bind_int(statement, 3, correct); (void)sqlite3_bind_int(statement, 4, attempt_id); if (sqlite3_step(statement) != SQLITE_DONE) goto rollback;
-        sqlite3_finalize(statement); statement = NULL;
-        if (sqlite3_prepare_v2(db, "INSERT INTO practice_attempts(user_id, score, correct_count, total, duration_seconds, configuration_json) SELECT user_id, score, correct_count, question_count, duration_seconds, '{\"source\":\"practice_session\"}' FROM practice_sessions WHERE id = ?;", -1, &statement, NULL) != SQLITE_OK) goto rollback;
-        (void)sqlite3_bind_int(statement, 1, attempt_id); if (sqlite3_step(statement) != SQLITE_DONE || !execute_sql(db, "COMMIT;")) goto rollback;
-        sqlite3_finalize(statement); statement = NULL; state[0] = '\0';
+    kz_auth_user user;
+    const char *code = NULL;
+    const char *message = NULL;
+    char state[20];
+    char data[192];
+    bool expired;
+    int attempt_id;
+    sqlite3_stmt *statement = NULL;
+
+    if (!require_session(token, &user, &code, &message)) {
+        send_error(conn->socket_fd, request_id, code, message);
+        return;
     }
-    if (sqlite3_prepare_v2(db, "SELECT state, correct_count, question_count, score FROM practice_sessions WHERE id = ?;", -1, &statement, NULL) != SQLITE_OK) goto internal;
-    (void)sqlite3_bind_int(statement, 1, attempt_id); if (sqlite3_step(statement) != SQLITE_ROW) goto internal;
-    (void)snprintf(data, sizeof(data), "{\"attempt_id\":%d,\"state\":\"%s\",\"correct_count\":%d,\"total\":%d,\"score\":%.2f}", attempt_id, (const char *)sqlite3_column_text(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2), sqlite3_column_double(statement, 3));
-    sqlite3_finalize(statement); kz_log_event_db(db, user.id, "PRACTICE_SUBMITTED", "practice_session", "submitted", "{}"); kz_db_unlock(); (void)send_ok_data(conn->socket_fd, request_id, data); return;
-rollback:
-    sqlite3_finalize(statement); (void)execute_sql(db, "ROLLBACK;"); kz_db_unlock(); send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not submit practice"); return;
+    if (!find_json_int_member(payload_json, "attempt_id", &attempt_id) || attempt_id <= 0) {
+        send_error(conn->socket_fd, request_id, "BAD_REQUEST", "attempt_id must be positive");
+        return;
+    }
+    sqlite3 *db = kz_db_lock();
+    if (db == NULL) goto internal;
+    if (!load_practice_owner(db, attempt_id, user.id, state, sizeof(state), &expired)) {
+        kz_db_unlock();
+        send_error(conn->socket_fd, request_id, "NOT_FOUND", "Practice attempt not found");
+        return;
+    }
+    if (strcmp(state, "IN_PROGRESS") == 0 && !finish_practice(db, attempt_id, user.id)) goto internal;
+    if (sqlite3_prepare_v2(db,
+        "SELECT state, correct_count, question_count, score FROM practice_sessions WHERE id = ?;",
+        -1, &statement, NULL) != SQLITE_OK) goto internal;
+    (void)sqlite3_bind_int(statement, 1, attempt_id);
+    if (sqlite3_step(statement) != SQLITE_ROW) goto internal;
+    (void)snprintf(data, sizeof(data),
+        "{\"attempt_id\":%d,\"state\":\"%s\",\"correct_count\":%d,\"total\":%d,\"score\":%.2f}",
+        attempt_id, (const char *)sqlite3_column_text(statement, 0),
+        sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2),
+        sqlite3_column_double(statement, 3));
+    sqlite3_finalize(statement);
+    kz_db_unlock();
+    (void)send_ok_data(conn->socket_fd, request_id, data);
+    return;
+
 internal:
-    sqlite3_finalize(statement); kz_db_unlock(); send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not read practice result");
+    sqlite3_finalize(statement);
+    kz_db_unlock();
+    send_error(conn->socket_fd, request_id, "INTERNAL_ERROR", "Could not submit practice");
+}
+
+static bool finish_one_expired_practice(void) {
+    sqlite3 *db = kz_db_lock();
+    sqlite3_stmt *statement = NULL;
+    bool finished = false;
+    if (db != NULL && sqlite3_prepare_v2(db,
+        "SELECT id, user_id FROM practice_sessions "
+        "WHERE state = 'IN_PROGRESS' AND ended_at <= datetime('now') "
+        "ORDER BY ended_at, id LIMIT 1;", -1, &statement, NULL) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW) {
+        int attempt_id = sqlite3_column_int(statement, 0);
+        int user_id = sqlite3_column_int(statement, 1);
+        sqlite3_finalize(statement);
+        statement = NULL;
+        finished = finish_practice(db, attempt_id, user_id);
+    }
+    sqlite3_finalize(statement);
+    kz_db_unlock();
+    return finished;
+}
+
+void process_expired_practice(void) {
+    while (finish_one_expired_practice()) {
+        /* Release the DB lock between attempts. */
+    }
 }

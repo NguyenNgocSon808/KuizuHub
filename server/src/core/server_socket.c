@@ -45,6 +45,7 @@ static void *room_expiry_worker(void *unused) {
     (void)unused;
     while (g_running) {
         process_expired_rooms();
+        process_expired_practice();
         wait_for_expiry_tick();
     }
     return NULL;
@@ -114,7 +115,7 @@ void handle_message(kz_connection *conn, const char *line) {
     } else if (strcmp(type, "START_ROOM") == 0) {
         handle_start_room(conn, request_id, token, payload_json);
     } else if (strcmp(type, "END_ROOM") == 0) {
-        handle_end_room_guard(conn, request_id, token, payload_json);
+        handle_end_room(conn, request_id, token, payload_json);
     } else if (strcmp(type, "LIST_QUESTIONS") == 0) {
         handle_list_questions(conn, request_id, token, payload_json);
     } else if (strcmp(type, "CREATE_QUESTION") == 0) {
